@@ -25,6 +25,14 @@
 
 #include <cstdint>
 
+// The size helpers below are constexpr AND device-callable (the attention kernel instantiates them); the
+// header is also read by plain-C++ TUs, where the CUDA qualifiers do not exist.
+#if defined(__CUDACC__)
+#define STRATA_TURBO_FN __host__ __device__
+#else
+#define STRATA_TURBO_FN
+#endif
+
 namespace strata::kernels {
 
 /// The rotation group size (head_dim 256 = 2 groups). Fixed by the FWHT-128 transform; snapshots
@@ -50,8 +58,9 @@ static_assert(sizeof(block_turbo3_tcq) ==  52, "block_turbo3_tcq must be 52 byte
 static_assert(sizeof(block_turbo2_tcq) ==  36, "block_turbo2_tcq must be 36 bytes");
 static_assert(sizeof(block_turbo1_tcq) ==  20, "block_turbo1_tcq must be 20 bytes");
 
-/// Bytes of one 128-value block for a tier (device-callable: the gather kernel sizes rows with it).
-__host__ __device__ inline uint64_t kv_turbo_block_bytes(int tier) {
+/// Bytes of one 128-value block for a tier (device-callable and constexpr: the attention kernel sizes rows
+/// with it at compile time).
+STRATA_TURBO_FN constexpr uint64_t kv_turbo_block_bytes(int tier) {
     switch (tier) {
         case kTurbo8: return sizeof(block_turbo8_0);
         case kTurbo4: return sizeof(block_turbo4_0);
@@ -61,8 +70,8 @@ __host__ __device__ inline uint64_t kv_turbo_block_bytes(int tier) {
     }
 }
 
-/// Bytes per cell and KV head: head_dim 256 = 2 groups -> 260 / 132 / 104 / 72 / 40.
-inline uint64_t kv_turbo_bytes_per_head(int head_dim, int tier) {
+/// Bytes per row (1 cell, 1 head, K or V), head_dim 256 = 2 groups -> 260 / 132 / 104 / 72 / 40.
+STRATA_TURBO_FN constexpr uint64_t kv_turbo_bytes_per_head(int head_dim, int tier) {
     return (uint64_t) (head_dim / QK_TURBO_GROUP) * kv_turbo_block_bytes(tier);
 }
 
@@ -81,8 +90,9 @@ extern int g_kv_turbo_tier;
 
 // ---- rotation (the domain contract) ----
 
-/// Forward rotation of rows of 128 floats: x*s1 -> FWHT-128 (orthonormal, 1/sqrt(128)) -> *s2.
-/// `qcur`/K/V rows are rotated with this before the quantized append; Q is rotated with it before scoring.
+/// Forward rotation of `n_rows` rows of 128 floats (head_dim 256 = TWO rows per head - callers pass
+/// n_head * 2, not n_head): x*s1 -> FWHT-128 (orthonormal, 1/sqrt(128)) -> *s2. Q is rotated with this
+/// before scoring; the K/V append rotates inside its own kernel.
 void turbo_rotate_forward128_cuda(const float* src, float* dst, int64_t n_rows, void* stream);
 /// Inverse: x*s2 -> FWHT-128 -> *s1 (the sign arrays swap; FWHT is self-inverse). Used on the attention
 /// output (a mix of rotated values) and by the gather/materialize paths.
@@ -106,9 +116,9 @@ void kv_append_turbo(uint8_t* k_turbo, uint8_t* v_turbo, const int32_t* page_tab
                      const float* K, const float* V, const QsaShapes& s, int tier, void* stream,
                      const KvHostPools* host = nullptr, const KvHostPools* stage = nullptr);
 
-/// Gather step[kStepWidth] cells named by `ids` into FP16 scratch [id][kv_head][head_dim], dequantized and
-/// INVERSE-rotated back to the original domain (the fallback-attention slow path; the fused read path in
-/// qsa_decode_attn reads the blocks directly and never materializes).
+/// Gather step[kStepWidth] cells named by `ids` into FP16 scratch [id][kv_head][head_dim], dequantized but
+/// STILL ROTATED - the same contract as kv_gather_q4_step: the fallback attention consumes rotated Q and the
+/// caller inverse-rotates the attention output (the dot products are rotation-invariant).
 void kv_gather_turbo_step(const uint8_t* k_turbo, const uint8_t* v_turbo, const int32_t* page_table,
                           const int32_t* ids, const int32_t* step, int64_t max_ids, const QsaShapes& s, int tier,
                           uint16_t* k_scratch, uint16_t* v_scratch, void* stream);

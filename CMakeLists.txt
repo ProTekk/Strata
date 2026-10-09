@@ -947,6 +947,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   target_include_directories(kv_q4_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(kv_q4_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME kv_q4_parity COMMAND kv_q4_parity)
+  # TurboQuant KV (kv_turbo.hpp): table checksums, rotation bitwise, per-tier append vs host quantizer /
+  # Viterbi oracle, gather decode, rotation dot invariance (GPU, synthetic, no model)
+  add_executable(kv_turbo_parity src/kernels/kv_turbo_parity.cpp)
+  target_include_directories(kv_turbo_parity PRIVATE ${_strata_gpu_include_directories})
+  target_link_libraries(kv_turbo_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
+  add_test(NAME kv_turbo_parity COMMAND kv_turbo_parity)
   # the verify window's one-launch forms (hyper-connection write, PLE post-ops with the commit's
   # history snapshots) vs the per-token launches they replace, bitwise (GPU, synthetic, no model)
   add_executable(verify_batch_parity src/kernels/verify_batch_parity.cpp)

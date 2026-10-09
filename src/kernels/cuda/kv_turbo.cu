@@ -118,10 +118,11 @@ __device__ __forceinline__ uint8_t turbo_find_nearest_4bit(float val) {
     return val < c_turbo4_mids[14] ? 14 : 15;
 }
 
-// TCQ bitstream read: element t's k output bits live at bit (L-k) + t*k, LSB-first per byte
-// (buun's read_9_bits for 3_tcq, read_8_bits for 2_tcq / 1_tcq).
-__device__ __forceinline__ int turbo_tcq_read_state(const uint8_t* qs, int t, int k, int prefix_bits) {
-    const int bit_pos = prefix_bits + t * k;
+// TCQ bitstream read: the L-bit state of element t lives at bit t*k, LSB-first (buun's read_9_bits for
+// 3_tcq, read_8_bits for 2_tcq / 1_tcq). The stored (L-k)-bit init prefix cancels against the state
+// window: state_t spans outputs t-(L/k-1) .. t, whose first bit sits at (L-k) + (t-(L/k-1))*k = t*k.
+__device__ __forceinline__ int turbo_tcq_read_state(const uint8_t* qs, int t, int k) {
+    const int bit_pos = t * k;
     const int byte_idx = bit_pos >> 3;
     const int bit_off = bit_pos & 7;
     // 9 bits at bit_off up to 7 can span 3 bytes; 8 bits span at most 2.
@@ -374,7 +375,7 @@ __global__ void __launch_bounds__(256) kv_append_turbo_kernel(
             float best = cost_rd[base_prev];
             int best_p = 0;
 #pragma unroll
-            for (int p = 1; p < P.k; p++) {
+            for (int p = 1; p < (1 << P.k); p++) {   // 2^k predecessors (k=1: 2, k=2: 4, k=3: 8)
                 const float c = cost_rd[base_prev | p];
                 if (c < best) { best = c; best_p = p; }
             }
@@ -453,7 +454,8 @@ __global__ void __launch_bounds__(256) kv_append_turbo_kernel(
     }
     const float recon_norm = sqrtf(block_sum128(my_recon_sq, cost[0]));
     float corrected_norm = (recon_norm > 1e-10f) ? grp_norm / recon_norm : grp_norm;
-    corrected_norm *= is_v ? kTurboTcqNormAlphaV : kTurboTcqNormAlphaK;
+    if (TIER != kTurbo1Tcq)   // buun's 1_tcq encoder applies no alpha (turbo-quant-cuda.cuh:2773)
+        corrected_norm *= is_v ? kTurboTcqNormAlphaV : kTurboTcqNormAlphaK;
 
     // Bitpack: prefix_bits of the initial state, then 128 k-bit outputs, LSB-first. Thread sid writes byte
     // sid; thread 0 also writes the norm. Written to every destination this cell has (dsts[] above).
@@ -529,8 +531,7 @@ __global__ void kv_gather_turbo_kernel(const uint8_t* __restrict__ k_pool, const
             const uint8_t idx = (j & 1) ? (qs[j / 2] >> 4) : (qs[j / 2] & 0xF);
             v[i] = c_turbo4_centroids[idx] * norm;
         } else {
-            const int st = turbo_tcq_read_state(qs, j, tier == kTurbo3Tcq ? 3 : (tier == kTurbo2Tcq ? 2 : 1),
-                                                tier == kTurbo1Tcq ? 7 : 6);
+            const int st = turbo_tcq_read_state(qs, j, tier == kTurbo3Tcq ? 3 : (tier == kTurbo2Tcq ? 2 : 1));
             v[i] = turbo_tcq_cb(tier, is_v ? 1 : 0)[st] * norm * alpha;
         }
     }
