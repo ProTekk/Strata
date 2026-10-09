@@ -371,8 +371,13 @@ int run(int fmt, int tier, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8,
     }
     k::qsa_prompt_attn_set_imma(-1);
     cudaFree(d_im);
-    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale) && ok_im;
-    const bool ok2 = diff <= 1e-4 * scale;
+    // TurboQuant (fmt 3): the tensor-core kernel dequantizes to FP16 rows in shared memory (FP32 rows would
+    // double the chunk's shared footprint), so its floor is FP16 epsilon - the same trade mode 3's
+    // dequantized-FP16 V made. The bar is 4e-3 of scale (~8x FP16 eps: rounding + the 256-term dot); the
+    // quantization error the tier itself carries is ~40x larger, so this rounding is noise on top of noise.
+    const double tol_new = fmt == 3 ? 5e-3 : 1e-6, tol_diff = fmt == 3 ? 4e-3 : 1e-4;
+    const bool ok1 = err_new <= std::max(4.0 * err_old, tol_new * ref_scale) && ok_im;
+    const bool ok2 = diff <= tol_diff * scale;
     uint64_t sum = 1469598103934665603ull;   // the new kernel's output bits: two builds of it compare by this
     for (float f : nw) {
         uint32_t b;
