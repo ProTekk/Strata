@@ -29,6 +29,8 @@ struct QsaAttnPools {
     const uint16_t* v_scale = nullptr;
     const uint8_t* k_q4 = nullptr;      ///< q4_0 block_q4_0 [page][kv_head][page_size][head_dim / 32 * 18]
     const uint8_t* v_q4 = nullptr;
+    const uint8_t* k_turbo = nullptr;   ///< turbo tier blocks [page][kv_head][page_size][2 groups], inline norm
+    const uint8_t* v_turbo = nullptr;
     const int32_t* page_table = nullptr;
 };
 
