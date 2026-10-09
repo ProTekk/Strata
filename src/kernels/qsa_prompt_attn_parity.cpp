@@ -334,8 +334,13 @@ int run(int fmt, int tier, int64_t ctx, int64_t nq, int reps) {   // fmt 1 int8,
     cudaEventRecord(e1);
     ck(cudaEventSynchronize(e1), "time");
     cudaEventElapsedTime(&ms_new, e0, e1);
-    const bool ok1 = err_new <= std::max(4.0 * err_old, 1e-6 * ref_scale);
-    const bool ok2 = diff <= 1e-4 * scale;
+    // TurboQuant (fmt 3): the tensor-core kernel dequantizes to FP16 rows in shared memory (FP32 rows would
+    // double the chunk's shared footprint), so its floor is FP16 epsilon - the same trade mode 3's
+    // dequantized-FP16 V made. The bar is 4e-3 of scale (~8x FP16 eps: rounding + the 256-term dot); the
+    // quantization error the tier itself carries is ~40x larger, so this rounding is noise on top of noise.
+    const double tol_new = fmt == 3 ? 5e-3 : 1e-6, tol_diff = fmt == 3 ? 4e-3 : 1e-4;
+    const bool ok1 = err_new <= std::max(4.0 * err_old, tol_new * ref_scale);
+    const bool ok2 = diff <= tol_diff * scale;
     std::printf("%s %s ctx %lld, %lld queries: vs FP64 old %.3g new %.3g (output scale %.3g); new vs old %.3g (%.2g of "
                 "scale); %.3f -> %.3f ms per chunk (%.2fx)\n",
                 ok1 && ok2 ? "PASS" : "FAIL",

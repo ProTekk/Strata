@@ -110,62 +110,73 @@ struct Smem {
 };
 
 // ---- TurboQuant (KV_MODE 5): the decode kernel's readers (qsa_decode_attn.cu) with an FP16 result - the value
-// is codebook[idx] * norm (TCQ: * alpha), rounded to half once. The tables are this TU's __constant__
-// materialization of the SAME constexpr arrays kv_turbo.cu uploads (kv_turbo_tables.hpp is the single source).
-__constant__ float c_pa_tq4_centroids[16] = {0};
-__constant__ float c_pa_tq8_centroids[256] = {0};
-__constant__ float c_pa_tq3_cb[512] = {0};
-__constant__ float c_pa_tq3_cb_v[512] = {0};
-__constant__ float c_pa_tq2_cb[256] = {0};
-__constant__ float c_pa_tq2_cb_v[256] = {0};
-__constant__ float c_pa_tq1_cb[256] = {0};
-__constant__ float c_pa_tq1_cb_v[256] = {0};
+// is codebook[idx] * norm (TCQ: * alpha), rounded to half once. The tables are this TU's device-side copy of the
+// SAME constexpr arrays kv_turbo.cu uploads (kv_turbo_tables.hpp is the single source). They are __device__
+// globals, not __constant__: the codebook index is per-lane divergent, and a constant-memory read serializes one
+// replay per unique address - the gather's hot spot. Global reads take the divergent indices in L1 instead.
+__device__ float d_pa_tq4_centroids[16];
+__device__ float d_pa_tq8_centroids[256];
+__device__ float d_pa_tq3_cb[512];
+__device__ float d_pa_tq3_cb_v[512];
+__device__ float d_pa_tq2_cb[256];
+__device__ float d_pa_tq2_cb_v[256];
+__device__ float d_pa_tq1_cb[256];
+__device__ float d_pa_tq1_cb_v[256];
 void prompt_attn_turbo_tables() {
     static bool done = false;
     if (done) return;
-    cudaMemcpyToSymbol(c_pa_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
-    cudaMemcpyToSymbol(c_pa_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
-    cudaMemcpyToSymbol(c_pa_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
-    cudaMemcpyToSymbol(c_pa_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
-    cudaMemcpyToSymbol(c_pa_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
-    cudaMemcpyToSymbol(c_pa_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
-    cudaMemcpyToSymbol(c_pa_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
-    cudaMemcpyToSymbol(c_pa_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
+    cudaMemcpyToSymbol(d_pa_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
+    cudaMemcpyToSymbol(d_pa_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
+    cudaMemcpyToSymbol(d_pa_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
+    cudaMemcpyToSymbol(d_pa_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
+    cudaMemcpyToSymbol(d_pa_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
+    cudaMemcpyToSymbol(d_pa_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
+    cudaMemcpyToSymbol(d_pa_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
+    cudaMemcpyToSymbol(d_pa_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
     done = true;
 }
 
-// The fp16 value of element d of a turbo row (the pool row of one cell's one KV head; groups of 128 elements).
-// `value` picks the side: the TCQ codebooks are side-split and the V side carries its decode alpha.
+// One 128-element group of a turbo row (the pool row of one cell's one KV head) dequantized to 128 consecutive
+// FP16: the norm loads once and the tier's codebook lookups hit the __device__ tables (L1, not the constant
+// cache - see above). Reads are per-byte on purpose: the tier blocks sit at 66/130-byte strides, so the code
+// bytes are never 16-byte aligned and vector loads would fault. `value` picks the side: the TCQ codebooks are
+// side-split and the V side carries its decode alpha.
 template <int TIER>
-__device__ __forceinline__ __half tq16(const QsaAttnPools& p, bool value, long long row, int d) {
+__device__ __forceinline__ void tq_group(const QsaAttnPools& p, bool value, long long row, int g, __half* dst) {
     constexpr int groups = HD / 128;
     constexpr int gb = (int) kv_turbo_block_bytes(TIER);
-    const uint8_t* blk = (value ? p.v_turbo : p.k_turbo) + row * (groups * gb) + (d / 128) * gb;
+    const uint8_t* blk = (value ? p.v_turbo : p.k_turbo) + row * (groups * gb) + g * gb;
     const float norm = __half2float(__ushort_as_half(*reinterpret_cast<const uint16_t*>(blk)));
     const uint8_t* qs = blk + 2;
-    const int t = d & 127;
-    float v;
     if constexpr (TIER == kTurbo8) {
-        v = c_pa_tq8_centroids[qs[t]] * norm;
+#pragma unroll
+        for (int j = 0; j < 128; ++j) dst[j] = __float2half_rn(d_pa_tq8_centroids[qs[j]] * norm);
     } else if constexpr (TIER == kTurbo4) {
-        const uint8_t b = qs[t / 2];
-        const uint8_t idx = (t & 1) ? (b >> 4) : (b & 0xF);
-        v = c_pa_tq4_centroids[idx] * norm;
+#pragma unroll
+        for (int b = 0; b < 64; ++b) {   // element 2b is the byte's low nibble, 2b + 1 the high one
+            const uint8_t x = qs[b];
+            dst[2 * b] = __float2half_rn(d_pa_tq4_centroids[x & 0xF] * norm);
+            dst[2 * b + 1] = __float2half_rn(d_pa_tq4_centroids[x >> 4] * norm);
+        }
     } else {
         constexpr int k = TIER == kTurbo3Tcq ? 3 : (TIER == kTurbo2Tcq ? 2 : 1);
-        const int bit_pos = t * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
-        const int byte_idx = bit_pos >> 3, bit_off = bit_pos & 7;
-        uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8);
-        if constexpr (k == 3) raw |= (uint32_t) qs[byte_idx + 2] << 16;
-        const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
-        const float cbv = TIER == kTurbo3Tcq ? (value ? c_pa_tq3_cb_v[state] : c_pa_tq3_cb[state])
-                        : TIER == kTurbo2Tcq ? (value ? c_pa_tq2_cb_v[state] : c_pa_tq2_cb[state])
-                                             : (value ? c_pa_tq1_cb_v[state] : c_pa_tq1_cb[state]);
         const float alpha = value ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
                                   : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2 : kTurboTcqAlphaVT1) : 1.0f;
-        v = cbv * norm * alpha;
+#pragma unroll
+        for (int j = 0; j < 128; ++j) {
+            const int bp = j * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
+            const int byte_idx = bp >> 3, bit_off = bp & 7;
+            // the last elements' window reaches up to two bytes past the code bytes; they are the block's zero
+            // padding (kv_turbo.cu's append), the same read the decode kernel's tq_value does
+            const uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8) |
+                                 ((uint32_t) qs[byte_idx + 2] << 16);
+            const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
+            const float cbv = TIER == kTurbo3Tcq ? (value ? d_pa_tq3_cb_v[state] : d_pa_tq3_cb[state])
+                            : TIER == kTurbo2Tcq ? (value ? d_pa_tq2_cb_v[state] : d_pa_tq2_cb[state])
+                                                 : (value ? d_pa_tq1_cb_v[state] : d_pa_tq1_cb[state]);
+            dst[j] = __float2half_rn(cbv * norm * alpha);
+        }
     }
-    return __float2half_rn(v);
 }
 
 template <int KV_MODE, int TIER = 0>
@@ -225,22 +236,19 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
         // gather the chunk's K and V rows (16-byte pieces; K8V4's V as q4_0 blocks dequantized to fp16)
         // and their scales
         if constexpr (KV_MODE == 5) {
-            // TurboQuant: dequantize each row to FP16 in place (scale 1 downstream). One (side, cell, 8 elements)
-            // per item; the tier's block arithmetic lives in tq16.
-            constexpr int ITEMS = HD / 8;
-            for (int i = t; i < 2 * CH * ITEMS; i += THREADS) {
-                const int kv = i / (CH * ITEMS), rem = i % (CH * ITEMS), c = rem / ITEMS, e = rem % ITEMS;
+            // TurboQuant: dequantize each row to FP16 in place (scale 1 downstream). One (side, cell, 128-element
+            // group) per item; the tier's block arithmetic lives in tq_group.
+            constexpr int GROUPS = HD / 128;
+            for (int i = t; i < 2 * CH * GROUPS; i += THREADS) {
+                const int kv = i / (CH * GROUPS), rem = i % (CH * GROUPS), c = rem / GROUPS, g = rem % GROUPS;
                 const long long r = S.row[c];
-                __half vals[8];
-                if (r >= 0) {
+                __half* dst = kv == 0 ? &S.k[c][g * 128] : &S.v[c][g * 128];
+                if (r >= 0) tq_group<TIER>(p, kv == 1, r, g, dst);
+                else {
+                    uint4 z = make_uint4(0, 0, 0, 0);
 #pragma unroll
-                    for (int j = 0; j < 8; ++j) vals[j] = tq16<TIER>(p, kv == 1, r, e * 8 + j);
-                } else {
-#pragma unroll
-                    for (int j = 0; j < 8; ++j) vals[j] = __half(0);
+                    for (int j = 0; j < 16; ++j) *reinterpret_cast<uint4*>(dst + j * 8) = z;
                 }
-                __half* dst = kv == 0 ? &S.k[c][e * 8] : &S.v[c][e * 8];
-                *reinterpret_cast<uint4*>(dst) = *reinterpret_cast<const uint4*>(vals);
             }
             for (int i = t; i < CH * 4; i += THREADS) {
                 const int c = i / 4, g = i % 4;
