@@ -1179,7 +1179,7 @@ int64_t max_blocks = (st.max_cells / s.idx_block) + 2;
     qsa_kv_resolve(st, g, b.ids, st.step, 1, cap, stream);
     if (st.kv_rot) strata::kernels::fwht256_inplace_cuda(b.qcur, g.n_head, stream);   // <Hq, Hk> = <q, k>
     if (st.kv_turbo) strata::kernels::turbo_rotate_forward128_cuda(b.qcur, b.qcur, g.n_head * 2, stream);  // <Rq, Rk> = <q, k> (2 groups/head)
-    if (g_fast_attn && !native_flash_attn_short && dump == nullptr && !st.kv_turbo) {  // turbo: gather fallback until the fused read path (Phase 4a)
+    if (g_fast_attn && !native_flash_attn_short && dump == nullptr) {   // turbo rides this path: KV_MODE 4 reads the tier blocks in place (qsa_decode_attn.cu)
         const strata::kernels::QsaAttnPools pools = qsa_attn_pools(st);
         strata::kernels::qsa_decode_attn_step(b.qcur, pools, b.ids, st.step, cap, s, b.attn_scratch, b.attn, stream);
     } else {

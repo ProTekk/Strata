@@ -226,6 +226,13 @@ void kv_stream_resolve(const KvStreamMap& m, const QsaAttnPools& slots, const Kv
         std::fprintf(stderr, "kv_stream: a block's scale run must be a multiple of 16 bytes\n");
         std::exit(1);
     }
+    if (fmt == kKvTurbo &&
+        (s.n_head_kv * s.page_size * (int64_t) kv_turbo_bytes_per_head((int) s.head_dim, g_kv_turbo_tier)) % 16 != 0) {
+        // the copy kernel moves uint4s; at head_dim 256 every tier's page run is a 16-B multiple (260/132/104/
+        // 72/40 x 128 rows), so this only fires on a geometry the codec does not support
+        std::fprintf(stderr, "kv_stream: a turbo block run must be a multiple of 16 bytes\n");
+        std::exit(1);
+    }
     // one sweep step looks at RT consecutive slots `(hand + thread) % n_slots`; with fewer slots than RT two
     // threads see the same slot and may both take it for two different misses.  The engine never streams with fewer
     // than qsa_kv_resident_min() / page_size = 5,120 slots, so this is a guard, not a limit.
