@@ -16,6 +16,7 @@
 #include "strata/kernels/gr.hpp"
 #include "strata/kernels/kv_q4.hpp"
 #include "strata/kernels/kv_q8.hpp"
+#include "strata/kernels/kv_turbo.hpp"
 #include "strata/kernels/native_moe.hpp"
 #include "strata/kernels/native_mmvq.hpp"
 #include "strata/kernels/native_qsa.hpp"
@@ -346,8 +347,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // only, whatever ring shape it takes (0, a window, or the -1 fully-resident fallback).
     const bool kv_hybrid_was = qsa_kv_hybrid();
     const bool kv_int8_was = qsa_kv_int8();
+    const bool kv_turbo_was = qsa_kv_turbo();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
+    if (kv_turbo_was) { qsa_set_kv_turbo(false, 0); qsa_set_kv_int8(true); }   // under turbo too (Phase 2:
+                                                 // the drafter's identity-ids read path has no turbo KV_MODE yet)
     uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) {
@@ -363,6 +367,7 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
     qsa_set_kv_int8(kv_int8_was);
     qsa_set_kv_hybrid(kv_hybrid_was);
+    if (kv_turbo_was) qsa_set_kv_turbo(true, strata::kernels::g_kv_turbo_tier);
     qsa_state_zero(st_, g, nullptr);
     cudaDeviceSynchronize();
     vram_ += sb;

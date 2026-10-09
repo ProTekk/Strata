@@ -57,6 +57,7 @@
 #include "strata/kernels/native_rope.hpp"
 #include "strata/kernels/mrope.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_turbo.hpp"
 #include "strata/kernels/qsa.hpp"
 #include "strata/core/native_head.hpp"
 #include "strata/core/verify.hpp"
@@ -807,6 +808,9 @@ void usage() {
                  "  --kv q4_0            4-bit K/V after a Hadamard rotation (PR #21): half of int8's memory,\n"
                  "                       slightly lower precision (see bench/results/2026-09-27-kv-q4)\n"
                  "  --kv k8v4            hybrid: INT8 K (exact attention scores) + rotated Q4_0 V, 816 B/cell\n"
+                 "                       (vs int8's 1,056); streams with --kv-resident too\n"
+                 "  --kv turbo8|turbo4|turbo3tcq|turbo2tcq|turbo1tcq\n"
+                 "                       TurboQuant: FWHT-128-rotated codebook/trellis KV, 520/264/208/144/80 B/cell\n"
                  "                       (vs int8's 1,056); streams with --kv-resident too\n"
                  "  --kv-resident N      KV streaming: keep N cells of each QSA layer in VRAM (min 20480) and the\n"
                  "                       whole K/V in pinned RAM; the freed VRAM goes to expert slots. 0 (default):\n"
@@ -2965,8 +2969,16 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (o.kv == "q4") o.kv = "q4_0";
-    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4") {
-        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0 or k8v4\n");
+    // TurboQuant tiers (kv_turbo.hpp): turbo8/turbo4 vanilla, turbo3tcq/turbo2tcq/turbo1tcq trellis.
+    int turbo_tier = -1;
+    if (o.kv == "turbo8") turbo_tier = strata::kernels::kTurbo8;
+    else if (o.kv == "turbo4") turbo_tier = strata::kernels::kTurbo4;
+    else if (o.kv == "turbo3tcq") turbo_tier = strata::kernels::kTurbo3Tcq;
+    else if (o.kv == "turbo2tcq") turbo_tier = strata::kernels::kTurbo2Tcq;
+    else if (o.kv == "turbo1tcq") turbo_tier = strata::kernels::kTurbo1Tcq;
+    if (o.kv != "fp16" && o.kv != "int8" && o.kv != "q4_0" && o.kv != "k8v4" && turbo_tier < 0) {
+        std::fprintf(stderr, "strata generate: --kv must be fp16, int8, q4_0, k8v4, turbo8, turbo4, turbo3tcq, "
+                             "turbo2tcq or turbo1tcq\n");
         return 2;
     }
     strata::core::qsa_set_kv_int8(o.kv == "int8");
@@ -2978,6 +2990,7 @@ int main(int argc, char** argv) {
     if (kv_rot != nullptr && kv_rot[0] == '1' && o.kv == "int8")
         std::fprintf(stderr, "strata generate: STRATA_KV_ROT=1: INT8 K/V through the Hadamard rotation (opt-in)\n");
     strata::core::qsa_set_kv_hybrid(o.kv == "k8v4");   // K8V4: INT8 K + rotated Q4_0 V, 816 B/cell
+    strata::core::qsa_set_kv_turbo(turbo_tier >= 0, turbo_tier >= 0 ? turbo_tier : strata::kernels::kTurbo4);
     if (o.kv_resident < 0) {
         std::fprintf(stderr, "strata generate: --kv-resident must be >= 0\n");
         return 2;
@@ -4508,7 +4521,8 @@ int main(int argc, char** argv) {
             }
             const bool q4 = strata::core::qsa_kv_q4();
             const bool hyb = strata::core::qsa_kv_hybrid();
-            const bool i8 = strata::core::qsa_kv_int8() && !q4;
+            const bool turb = strata::core::qsa_kv_turbo();
+            const bool i8 = strata::core::qsa_kv_int8() && !q4 && !turb;
             std::vector<strata::core::QsaState> qs((size_t) g.n_qsa_layers());
             for (int64_t j = 0; j < g.n_qsa_layers(); ++j) {
                 qs[(size_t) j].max_cells = o.max_context;
@@ -4517,6 +4531,7 @@ int main(int argc, char** argv) {
                 qs[(size_t) j].kv_int8 = i8;
                 qs[(size_t) j].kv_q4 = q4;
                 qs[(size_t) j].kv_hybrid = hyb;
+                qs[(size_t) j].kv_turbo = turb;
             }
             strata::core::SessionState ss{};
             ss.max_cells = o.max_context;
@@ -14546,7 +14561,11 @@ int main(int argc, char** argv) {
                 auto kv_arrays = [&](const strata::core::QsaState& st) {
                     const bool h = st.kv_mode != 0;
                     std::vector<std::pair<const void*, int64_t>> a;
-                    if (st.kv_q4) {
+                    if (st.kv_turbo) {
+                        const int64_t tb = (int64_t) strata::kernels::kv_turbo_bytes_per_head(
+                            (int) qs.head_dim, strata::kernels::g_kv_turbo_tier);
+                        a = {{h ? st.host.k_turbo : st.k_turbo, tb}, {h ? st.host.v_turbo : st.v_turbo, tb}};
+                    } else if (st.kv_q4) {
                         const int64_t q4b = (int64_t) strata::kernels::kv_q4_bytes_per_head((int) qs.head_dim);
                         a = {{h ? st.host.k_q4 : st.k_q4, q4b}, {h ? st.host.v_q4 : st.v_q4, q4b}};
                     } else if (st.kv_hybrid) {

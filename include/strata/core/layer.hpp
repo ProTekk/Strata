@@ -219,6 +219,10 @@ struct QsaState {
     bool kv_q4 = false;
     uint8_t* k_q4 = nullptr;
     uint8_t* v_q4 = nullptr;
+    /// TurboQuant (qsa_set_kv_turbo, kv_turbo.hpp): FWHT-128-rotated tier blocks, inline norms, no scale arrays.
+    bool kv_turbo = false;
+    uint8_t* k_turbo = nullptr;
+    uint8_t* v_turbo = nullptr;
     /// Hybrid K8V4: K in INT8 (unrotated - the scores stay exact), V in rotated Q4_0 (kv_q4.hpp): 816 B per cell.
     /// Uses k_q/k_scale + v_q4. Mode 0 only (no KV streaming, no ring); under this setting the MTP drafter's
     /// ring state stays plain INT8, so the block movers never see the hybrid layout.
@@ -318,9 +322,15 @@ bool qsa_kv_q4();
 /// Hybrid K8V4 (`--kv k8v4`): K in INT8, V in rotated Q4_0 - 816 B per cell; streams with --kv-resident too.
 void qsa_set_kv_hybrid(bool enabled);
 bool qsa_kv_hybrid();
-/// The state's KV format for the block-moving functions of kv_stream.hpp (kKvF16 / kKvInt8 / kKvQ4 / kKvHybrid).
+/// TurboQuant KV (`--kv turbo8|turbo4|turbo3tcq|turbo2tcq|turbo1tcq`, kv_turbo.hpp): FWHT-128-rotated tier
+/// blocks (132 B per cell and head at turbo4). Set before sizing and initializing the session.
+void qsa_set_kv_turbo(bool enabled, int tier);
+bool qsa_kv_turbo();
+/// The state's KV format for the block-moving functions of kv_stream.hpp (kKvF16 / kKvInt8 / kKvQ4 / kKvHybrid /
+/// kKvTurbo).
 inline int qsa_kv_format(const QsaState& st) {
     if (st.kv_hybrid) return strata::kernels::kKvHybrid;   // K8V4: its own three runs (kv_stream.cu)
+    if (st.kv_turbo) return strata::kernels::kKvTurbo;
     return st.kv_q4 ? strata::kernels::kKvQ4 : st.kv_int8 ? strata::kernels::kKvInt8 : strata::kernels::kKvF16;
 }
 uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, QsaState& st,
