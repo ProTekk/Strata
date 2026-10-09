@@ -179,8 +179,11 @@ template <int TIER>
 __device__ __forceinline__ void turbo_quantize_vanilla_group(const float* __restrict__ src, uint8_t* __restrict__ dst) {
     float x[128];
     float norm_sq = 0.0f;
+    // __fmul_rn/__fadd_rn everywhere this file mirrors host arithmetic: nvcc's default FMA contraction fused
+    // `acc += s*s` and `x*inv*127.5f + 127.5f` into FFMA while the host kept separate ops - one ULP, and the
+    // lrint boundary flips (kv_turbo_parity caught it on one turbo8 block in 262k).
 #pragma unroll
-    for (int j = 0; j < 128; j++) norm_sq += src[j] * src[j];
+    for (int j = 0; j < 128; j++) norm_sq = __fadd_rn(norm_sq, __fmul_rn(src[j], src[j]));
     const float norm = sqrtf(norm_sq);
     const float inv_norm = norm > 1e-10f ? 1.0f / norm : 0.0f;
 #pragma unroll
@@ -201,7 +204,7 @@ __device__ __forceinline__ void turbo_quantize_vanilla_group(const float* __rest
         for (int j = 0; j < 128; j++) {
             const uint8_t idx = (j & 1) ? (blk->qs[j / 2] >> 4) : (blk->qs[j / 2] & 0xF);
             const float r = c_turbo4_centroids[idx];
-            recon_sq += r * r;
+            recon_sq = __fadd_rn(recon_sq, __fmul_rn(r, r));
         }
         const float recon_norm = sqrtf(recon_sq);
         blk->norm = f16_from_f32((recon_norm > 1e-10f) ? norm / recon_norm : norm);
@@ -215,8 +218,8 @@ __device__ __forceinline__ void turbo_quantize_vanilla_group(const float* __rest
         const float inv_scale = 1.0f / scale;
 #pragma unroll
         for (int j = 0; j < 128; j++) {
-            int idx = (int) lrintf(x[j] * inv_scale * 127.5f + 127.5f);
-            idx = idx < 0 ? 0 : (idx > 255 ? 255 : idx);
+            const int idx0 = (int) lrintf(__fadd_rn(__fmul_rn(__fmul_rn(x[j], inv_scale), 127.5f), 127.5f));
+            const int idx = idx0 < 0 ? 0 : (idx0 > 255 ? 255 : idx0);
             blk->qs[j] = (uint8_t) idx;
         }
         blk->norm = f16_from_f32(norm * scale);

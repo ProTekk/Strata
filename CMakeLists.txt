@@ -1209,6 +1209,12 @@ if(STRATA_ENABLE_CUDA OR STRATA_ENABLE_HIP)
   # TurboQuant KV (kv_turbo.hpp): table checksums, rotation bitwise, per-tier append vs host quantizer /
   # Viterbi oracle, gather decode, rotation dot invariance (GPU, synthetic, no model)
   add_executable(kv_turbo_parity src/kernels/kv_turbo_parity.cpp)
+  # the host quantizer must round exactly like the kernel's __fmul_rn/__fadd_rn chain - gcc's default
+  # -ffp-contract=fast would fuse `norm_sq += s*s` into an FMA and flip lrint ties (the 1-in-262k turbo8
+  # block the first run caught)
+  if(NOT MSVC)
+    target_compile_options(kv_turbo_parity PRIVATE -ffp-contract=off)
+  endif()
   target_include_directories(kv_turbo_parity PRIVATE ${_strata_gpu_include_directories})
   target_link_libraries(kv_turbo_parity PRIVATE strata_kernels ${_strata_gpu_runtime_target})
   add_test(NAME kv_turbo_parity COMMAND kv_turbo_parity)
