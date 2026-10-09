@@ -8,6 +8,9 @@
 #include "strata/kernels/gfx_arch.hpp"
 #include "strata/kernels/kv_q8.hpp"
 #include "strata/kernels/kv_q4.hpp"
+#include "strata/kernels/kv_turbo.hpp"
+#include "strata/kernels/kv_turbo_tables.hpp"
+#include "strata/kernels/kv_turbo_alpha.hpp"
 
 #include <cuda_fp16.h>
 #include <cuda_runtime.h>
@@ -86,11 +89,14 @@ __device__ __forceinline__ uint32_t pack_h2(float lo_k, float hi_k) {   // eleme
 // KV_MODE 4 (Q4_0 K and V, `--kv q4_0`): mode 1 with a scale per 32 values - each q4_0 block's codes enter as exact
 // int8 (code - 8) and its fp16 scale is applied in FP32, as mode 1's are; the caller rotates q and un-rotates the
 // output (kv_q4.hpp).
+// KV_MODE 5 (TurboQuant, `--kv turbo*`): the tier's blocks are dequantized to fp16 at gather (scale 1), so
+// everything downstream of the load is the mode-0 path; the caller rotates q and un-rotates the output
+// (kv_turbo.hpp). TIER is prompt_attn_kernel's last template parameter (g_kv_turbo_tier at launch).
 template <int KV_MODE, bool PF = false>
 struct Smem {
-    using KElem = typename std::conditional<KV_MODE == 0, __half, int8_t>::type;
+    using KElem = typename std::conditional<KV_MODE == 0 || KV_MODE == 5, __half, int8_t>::type;
     using VElem = typename std::conditional<KV_MODE == 1 || KV_MODE == 4, int8_t, __half>::type;
-    static constexpr int KROW = KV_MODE == 0 ? HD + 8 : HD + 16;   // elements; 16-byte aligned rows, banks spread
+    static constexpr int KROW = (KV_MODE == 0 || KV_MODE == 5) ? HD + 8 : HD + 16;   // elements; 16-byte aligned rows, banks spread
     static constexpr int VROW = (KV_MODE == 1 || KV_MODE == 4) ? HD + 16 : HD + 8;
     static constexpr int NG = KV_MODE == 4 ? HD / QK4_0 : 4;      // scale groups per row (q4_0: 8 of 32, else 4 of 64)
     __half qh[16][QS];
@@ -110,7 +116,66 @@ struct Smem {
     long long row[CH];
 };
 
-template <int KV_MODE, bool PF = false>
+// ---- TurboQuant (KV_MODE 5): the decode kernel's readers (qsa_decode_attn.cu) with an FP16 result - the value
+// is codebook[idx] * norm (TCQ: * alpha), rounded to half once. The tables are this TU's __constant__
+// materialization of the SAME constexpr arrays kv_turbo.cu uploads (kv_turbo_tables.hpp is the single source).
+__constant__ float c_pa_tq4_centroids[16] = {0};
+__constant__ float c_pa_tq8_centroids[256] = {0};
+__constant__ float c_pa_tq3_cb[512] = {0};
+__constant__ float c_pa_tq3_cb_v[512] = {0};
+__constant__ float c_pa_tq2_cb[256] = {0};
+__constant__ float c_pa_tq2_cb_v[256] = {0};
+__constant__ float c_pa_tq1_cb[256] = {0};
+__constant__ float c_pa_tq1_cb_v[256] = {0};
+void prompt_attn_turbo_tables() {
+    static bool done = false;
+    if (done) return;
+    cudaMemcpyToSymbol(c_pa_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
+    cudaMemcpyToSymbol(c_pa_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
+    cudaMemcpyToSymbol(c_pa_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
+    cudaMemcpyToSymbol(c_pa_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
+    cudaMemcpyToSymbol(c_pa_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
+    cudaMemcpyToSymbol(c_pa_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
+    cudaMemcpyToSymbol(c_pa_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
+    cudaMemcpyToSymbol(c_pa_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
+    done = true;
+}
+
+// The fp16 value of element d of a turbo row (the pool row of one cell's one KV head; groups of 128 elements).
+// `value` picks the side: the TCQ codebooks are side-split and the V side carries its decode alpha.
+template <int TIER>
+__device__ __forceinline__ __half tq16(const QsaAttnPools& p, bool value, long long row, int d) {
+    constexpr int groups = HD / 128;
+    constexpr int gb = (int) kv_turbo_block_bytes(TIER);
+    const uint8_t* blk = (value ? p.v_turbo : p.k_turbo) + row * (groups * gb) + (d / 128) * gb;
+    const float norm = __half2float(__ushort_as_half(*reinterpret_cast<const uint16_t*>(blk)));
+    const uint8_t* qs = blk + 2;
+    const int t = d & 127;
+    float v;
+    if constexpr (TIER == kTurbo8) {
+        v = c_pa_tq8_centroids[qs[t]] * norm;
+    } else if constexpr (TIER == kTurbo4) {
+        const uint8_t b = qs[t / 2];
+        const uint8_t idx = (t & 1) ? (b >> 4) : (b & 0xF);
+        v = c_pa_tq4_centroids[idx] * norm;
+    } else {
+        constexpr int k = TIER == kTurbo3Tcq ? 3 : (TIER == kTurbo2Tcq ? 2 : 1);
+        const int bit_pos = t * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
+        const int byte_idx = bit_pos >> 3, bit_off = bit_pos & 7;
+        uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8);
+        if constexpr (k == 3) raw |= (uint32_t) qs[byte_idx + 2] << 16;
+        const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
+        const float cbv = TIER == kTurbo3Tcq ? (value ? c_pa_tq3_cb_v[state] : c_pa_tq3_cb[state])
+                        : TIER == kTurbo2Tcq ? (value ? c_pa_tq2_cb_v[state] : c_pa_tq2_cb[state])
+                                             : (value ? c_pa_tq1_cb_v[state] : c_pa_tq1_cb[state]);
+        const float alpha = value ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
+                                  : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2 : kTurboTcqAlphaVT1) : 1.0f;
+        v = cbv * norm * alpha;
+    }
+    return __float2half_rn(v);
+}
+
+template <int KV_MODE, bool PF = false, int TIER = 0>
 __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __restrict__ q, QsaAttnPools p,
                                                               const int32_t* __restrict__ ids,
                                                               const int32_t* __restrict__ steps, int n_kv_heads,
@@ -209,7 +274,30 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
         __syncthreads();   // rows ready; the previous chunk's p.v is done with k, v, s
         // gather the chunk's K and V rows (16-byte pieces; K8V4's V as q4_0 blocks dequantized to fp16)
         // and their scales
-        if constexpr (KV_MODE == 4) {
+        if constexpr (KV_MODE == 5) {
+            // TurboQuant: dequantize each row to FP16 in place (scale 1 downstream). One (side, cell, 8 elements)
+            // per item; the tier's block arithmetic lives in tq16.
+            constexpr int ITEMS = HD / 8;
+            for (int i = t; i < 2 * CH * ITEMS; i += THREADS) {
+                const int kv = i / (CH * ITEMS), rem = i % (CH * ITEMS), c = rem / ITEMS, e = rem % ITEMS;
+                const long long r = S.row[c];
+                __half vals[8];
+                if (r >= 0) {
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) vals[j] = tq16<TIER>(p, kv == 1, r, e * 8 + j);
+                } else {
+#pragma unroll
+                    for (int j = 0; j < 8; ++j) vals[j] = __half(0);
+                }
+                __half* dst = kv == 0 ? &S.k[c][e * 8] : &S.v[c][e * 8];
+                *reinterpret_cast<uint4*>(dst) = *reinterpret_cast<const uint4*>(vals);
+            }
+            for (int i = t; i < CH * 4; i += THREADS) {
+                const int c = i / 4, g = i % 4;
+                S.ks[c][g] = 1.0f;
+                S.vs[c][g] = 1.0f;
+            }
+        } else if constexpr (KV_MODE == 4) {
             // q4_0 K and V: one (K or V, cell, block) per item - the block's 16 code bytes (2-byte aligned: eight
             // 16-bit loads) become 32 exact int8 codes (element j in the low nibble of byte j, j + 16 in the high
             // one), its fp16 scale goes to ks/vs
@@ -331,7 +419,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                     al[1] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig]);
                     al[2] = *reinterpret_cast<const uint32_t*>(&S.ql[gid][k0 + 2 * tig + 8]);
                     al[3] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig + 8]);
-                    if constexpr (KV_MODE != 0) {   // modes 1 and 3: the K side is INT8 codes
+                    if constexpr (KV_MODE != 0 && KV_MODE != 5) {   // modes 1, 3, 4: the K side is INT8 codes
                         b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.kv.k[cb + gid][k0 + 2 * tig]));
                         b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.kv.k[cb + gid][k0 + 2 * tig + 8]));
                     } else {
@@ -1424,7 +1512,7 @@ bool launch_i8v3(const float* q, const QsaAttnPools& pools, const int32_t* ids, 
     return true;
 }
 
-template <int KV_MODE, bool PF = false>
+template <int KV_MODE, bool PF = false, int TIER = 0>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
             const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
     static bool attr[64] = {};   // per device, as above
@@ -1433,7 +1521,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
     const int bytes = (int) sizeof(Smem<KV_MODE, PF>);
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
-        if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE, PF>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
+        if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE, PF, TIER>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
             cudaSuccess) {
             cudaGetLastError();
             return false;
@@ -1443,7 +1531,7 @@ bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const
     const float scale_log2 = 1.4426950408889634f / sqrtf((float) HD);
     for (int64_t q0 = 0; q0 < n_q; q0 += 65535) {
         const int64_t nb = n_q - q0 < 65535 ? n_q - q0 : 65535;
-        prompt_attn_kernel<KV_MODE, PF><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
+        prompt_attn_kernel<KV_MODE, PF, TIER><<<dim3((unsigned) nb, (unsigned) s.n_head_kv), THREADS, bytes, st>>>(
             q + q0 * s.n_head * HD, pools, ids + q0 * cap, steps + q0 * kStepCount, (int) s.n_head_kv,
             (int) s.page_size, scale_log2, attn + q0 * s.n_head * HD, (int) cap);
     }
@@ -2295,6 +2383,23 @@ bool qsa_prompt_attn_batch(const float* q, const QsaAttnPools& pools, const int3
     if (s.head_dim != HD || s.n_head != (int64_t) G * s.n_head_kv || cap <= 0 || !ids || !steps || !pools.page_table)
         return false;
     cudaStream_t st = (cudaStream_t) stream;
+    if (pools.k_turbo != nullptr) {   // TurboQuant (--kv turbo*): mode 5.  STRATA_PROMPT_ATTN_TURBO=0: the old kernel (A/B)
+        static const bool off = [] {
+            const char* v = std::getenv("STRATA_PROMPT_ATTN_TURBO");
+            return v != nullptr && v[0] == '0';
+        }();
+        // sm_80+ only, as mode 4's: on Turing the fp16 path runs as pairs of m16n8k8 MMAs, unchecked by parity
+        if (off || turing || pools.v_turbo == nullptr) return false;
+        prompt_attn_turbo_tables();
+        switch (g_kv_turbo_tier) {
+            case kTurbo8:    return launch<5, false, kTurbo8>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            case kTurbo4:    return launch<5, false, kTurbo4>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            case kTurbo3Tcq: return launch<5, false, kTurbo3Tcq>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            case kTurbo2Tcq: return launch<5, false, kTurbo2Tcq>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            case kTurbo1Tcq: return launch<5, false, kTurbo1Tcq>(q, pools, ids, steps, cap, s, attn, n_q, st);
+            default: return false;
+        }
+    }
     if (pools.k_q4 != nullptr) {   // Q4_0 K and V (--kv q4_0): mode 4.  STRATA_PROMPT_ATTN_Q4=0: the old kernel (A/B)
         static const bool q4_off = [] {
             const char* v = std::getenv("STRATA_PROMPT_ATTN_Q4");
