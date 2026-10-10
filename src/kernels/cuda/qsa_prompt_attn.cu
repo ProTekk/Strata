@@ -109,59 +109,67 @@ struct Smem {
     long long row[CH];
 };
 
-// ---- TurboQuant (KV_MODE 5): the decode kernel's readers (qsa_decode_attn.cu) with an FP16 result - the value
-// is codebook[idx] * norm (TCQ: * alpha), rounded to half once. The tables are this TU's device-side copy of the
-// SAME constexpr arrays kv_turbo.cu uploads (kv_turbo_tables.hpp is the single source). They are __device__
-// globals, not __constant__: the codebook index is per-lane divergent, and a constant-memory read serializes one
-// replay per unique address - the gather's hot spot. Global reads take the divergent indices in L1 instead.
-__device__ float d_pa_tq4_centroids[16];
-__device__ float d_pa_tq8_centroids[256];
-__device__ float d_pa_tq3_cb[512];
-__device__ float d_pa_tq3_cb_v[512];
-__device__ float d_pa_tq2_cb[256];
-__device__ float d_pa_tq2_cb_v[256];
-__device__ float d_pa_tq1_cb[256];
-__device__ float d_pa_tq1_cb_v[256];
+// ---- TurboQuant (KV_MODE 5): the decode kernel's readers (qsa_decode_attn.cu) with an FP16 result. The norm
+// folds into the FP32 ks/vs scales the score and p.v paths already multiply by (the group's single scalar moves
+// out of the per-element chain; the staged rows stay FP16 - same bytes, no occupancy claim). The tables are this
+// TU's device-side copy of the SAME constexpr arrays kv_turbo.cu uploads (kv_turbo_tables.hpp is the single
+// source), pre-rounded: the byte-indexed tiers as half2 lookup tables - one aligned 32-bit read per byte yields
+// both nibbles as halves, no arithmetic - and the TCQ codebooks as half, so the per-element work is one read and
+// one store. They are __device__ globals, not __constant__: the codebook index is per-lane divergent, and a
+// constant-memory read serializes one replay per unique address - the gather's hot spot. Global reads take the
+// divergent indices in L1 instead.
+__device__ __half2 d_pa_tq4_lut[256];      // byte -> (low nibble, high nibble) as halves
+__device__ __half d_pa_tq8_cb_h[256];
+__device__ __half d_pa_tq3_cb_h[512];
+__device__ __half d_pa_tq3_cb_v_h[512];
+__device__ __half d_pa_tq2_cb_h[256];
+__device__ __half d_pa_tq2_cb_v_h[256];
+__device__ __half d_pa_tq1_cb_h[256];
+__device__ __half d_pa_tq1_cb_v_h[256];
 void prompt_attn_turbo_tables() {
     static bool done = false;
     if (done) return;
-    cudaMemcpyToSymbol(d_pa_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
-    cudaMemcpyToSymbol(d_pa_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
-    cudaMemcpyToSymbol(d_pa_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
-    cudaMemcpyToSymbol(d_pa_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
-    cudaMemcpyToSymbol(d_pa_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
-    cudaMemcpyToSymbol(d_pa_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
-    cudaMemcpyToSymbol(d_pa_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
-    cudaMemcpyToSymbol(d_pa_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
+    static __half2 lut4[256];
+    static __half h8[256], h3[512], h3v[512], h2[256], h2v[256], h1[256], h1v[256];
+    for (int b = 0; b < 256; ++b)
+        lut4[b] = make_half2(__float2half_rn(kTurbo4Centroids[b & 0xF]), __float2half_rn(kTurbo4Centroids[b >> 4]));
+    for (int i = 0; i < 256; ++i) h8[i] = __float2half_rn(kTurbo8Centroids[i]);
+    for (int i = 0; i < 512; ++i) { h3[i] = __float2half_rn(kTurbo3TcqCodebook[i]); h3v[i] = __float2half_rn(kTurbo3TcqCodebookV[i]); }
+    for (int i = 0; i < 256; ++i) {
+        h2[i] = __float2half_rn(kTurbo2TcqCodebook[i]); h2v[i] = __float2half_rn(kTurbo2TcqCodebookV[i]);
+        h1[i] = __float2half_rn(kTurbo1TcqCodebook[i]); h1v[i] = __float2half_rn(kTurbo1TcqCodebookV[i]);
+    }
+    cudaMemcpyToSymbol(d_pa_tq4_lut, lut4, sizeof(lut4));
+    cudaMemcpyToSymbol(d_pa_tq8_cb_h, h8, sizeof(h8));
+    cudaMemcpyToSymbol(d_pa_tq3_cb_h, h3, sizeof(h3));
+    cudaMemcpyToSymbol(d_pa_tq3_cb_v_h, h3v, sizeof(h3v));
+    cudaMemcpyToSymbol(d_pa_tq2_cb_h, h2, sizeof(h2));
+    cudaMemcpyToSymbol(d_pa_tq2_cb_v_h, h2v, sizeof(h2v));
+    cudaMemcpyToSymbol(d_pa_tq1_cb_h, h1, sizeof(h1));
+    cudaMemcpyToSymbol(d_pa_tq1_cb_v_h, h1v, sizeof(h1v));
     done = true;
 }
 
 // One 128-element group of a turbo row (the pool row of one cell's one KV head) dequantized to 128 consecutive
-// FP16: the norm loads once and the tier's codebook lookups hit the __device__ tables (L1, not the constant
-// cache - see above). Reads are per-byte on purpose: the tier blocks sit at 66/130-byte strides, so the code
-// bytes are never 16-byte aligned and vector loads would fault. `value` picks the side: the TCQ codebooks are
-// side-split and the V side carries its decode alpha.
+// FP16 CODEBOOK values (norm NOT applied - the caller folds the returned block norm into ks/vs). The byte-indexed
+// tiers read the half2 LUTs; the TCQ tiers read the pre-rounded half codebooks (the TCQ codebooks are side-split
+// and the V side carries its decode alpha). Reads are per-byte on purpose: the tier blocks sit at 66/130-byte
+// strides, so the code bytes are never 16-byte aligned and vector loads would fault.
 template <int TIER>
-__device__ __forceinline__ void tq_group(const QsaAttnPools& p, bool value, long long row, int g, __half* dst) {
+__device__ __forceinline__ __half tq_group(const QsaAttnPools& p, bool value, long long row, int g, __half* dst) {
     constexpr int groups = HD / 128;
     constexpr int gb = (int) kv_turbo_block_bytes(TIER);
     const uint8_t* blk = (value ? p.v_turbo : p.k_turbo) + row * (groups * gb) + g * gb;
-    const float norm = __half2float(__ushort_as_half(*reinterpret_cast<const uint16_t*>(blk)));
+    const __half norm = __ushort_as_half(*reinterpret_cast<const uint16_t*>(blk));
     const uint8_t* qs = blk + 2;
-    if constexpr (TIER == kTurbo8) {
+    if constexpr (TIER == kTurbo8) {   // 8 bits/element: one code per byte, one half read each
 #pragma unroll
-        for (int j = 0; j < 128; ++j) dst[j] = __float2half_rn(d_pa_tq8_centroids[qs[j]] * norm);
-    } else if constexpr (TIER == kTurbo4) {
+        for (int j = 0; j < 128; ++j) dst[j] = d_pa_tq8_cb_h[qs[j]];
+    } else if constexpr (TIER == kTurbo4) {   // 4 bits/element: one half2 read per byte yields both nibbles
 #pragma unroll
-        for (int b = 0; b < 64; ++b) {   // element 2b is the byte's low nibble, 2b + 1 the high one
-            const uint8_t x = qs[b];
-            dst[2 * b] = __float2half_rn(d_pa_tq4_centroids[x & 0xF] * norm);
-            dst[2 * b + 1] = __float2half_rn(d_pa_tq4_centroids[x >> 4] * norm);
-        }
+        for (int b = 0; b < 64; ++b) *reinterpret_cast<__half2*>(dst + 2 * b) = d_pa_tq4_lut[qs[b]];
     } else {
         constexpr int k = TIER == kTurbo3Tcq ? 3 : (TIER == kTurbo2Tcq ? 2 : 1);
-        const float alpha = value ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
-                                  : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2 : kTurboTcqAlphaVT1) : 1.0f;
 #pragma unroll
         for (int j = 0; j < 128; ++j) {
             const int bp = j * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
@@ -171,12 +179,12 @@ __device__ __forceinline__ void tq_group(const QsaAttnPools& p, bool value, long
             const uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8) |
                                  ((uint32_t) qs[byte_idx + 2] << 16);
             const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
-            const float cbv = TIER == kTurbo3Tcq ? (value ? d_pa_tq3_cb_v[state] : d_pa_tq3_cb[state])
-                            : TIER == kTurbo2Tcq ? (value ? d_pa_tq2_cb_v[state] : d_pa_tq2_cb[state])
-                                                 : (value ? d_pa_tq1_cb_v[state] : d_pa_tq1_cb[state]);
-            dst[j] = __float2half_rn(cbv * norm * alpha);
+            dst[j] = TIER == kTurbo3Tcq ? (value ? d_pa_tq3_cb_v_h[state] : d_pa_tq3_cb_h[state])
+                     : TIER == kTurbo2Tcq ? (value ? d_pa_tq2_cb_v_h[state] : d_pa_tq2_cb_h[state])
+                                          : (value ? d_pa_tq1_cb_v_h[state] : d_pa_tq1_cb_h[state]);
         }
     }
+    return norm;
 }
 
 template <int KV_MODE, int TIER = 0>
@@ -236,24 +244,30 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
         // gather the chunk's K and V rows (16-byte pieces; K8V4's V as q4_0 blocks dequantized to fp16)
         // and their scales
         if constexpr (KV_MODE == 5) {
-            // TurboQuant: dequantize each row to FP16 in place (scale 1 downstream). One (side, cell, 128-element
-            // group) per item; the tier's block arithmetic lives in tq_group.
+            // TurboQuant: stage the row's FP16 codebook values in place; the block norm (TCQ V side: also its
+            // decode alpha) folds into ks/vs, which the score and p.v paths already multiply by in FP32. One
+            // (side, cell, 128-element group) per item; the tier's block arithmetic lives in tq_group.
             constexpr int GROUPS = HD / 128;
             for (int i = t; i < 2 * CH * GROUPS; i += THREADS) {
                 const int kv = i / (CH * GROUPS), rem = i % (CH * GROUPS), c = rem / GROUPS, g = rem % GROUPS;
                 const long long r = S.row[c];
                 __half* dst = kv == 0 ? &S.k[c][g * 128] : &S.v[c][g * 128];
-                if (r >= 0) tq_group<TIER>(p, kv == 1, r, g, dst);
-                else {
+                float sc = 0.0f;
+                if (r >= 0) {
+                    const __half norm = tq_group<TIER>(p, kv == 1, r, g, dst);
+                    const float alpha = kv == 1 ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
+                                              : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2
+                                              : TIER == kTurbo1Tcq ? kTurboTcqAlphaVT1 : 1.0f) : 1.0f;
+                    sc = __half2float(norm) * alpha;
+                } else {
                     uint4 z = make_uint4(0, 0, 0, 0);
 #pragma unroll
                     for (int j = 0; j < 16; ++j) *reinterpret_cast<uint4*>(dst + j * 8) = z;
                 }
-            }
-            for (int i = t; i < CH * 4; i += THREADS) {
-                const int c = i / 4, g = i % 4;
-                S.ks[c][g] = 1.0f;
-                S.vs[c][g] = 1.0f;
+                // the block's 128 elements span two 64-dim scale groups: the norm goes to both slots
+                float* scd = kv == 0 ? &S.ks[c][2 * g] : &S.vs[c][2 * g];
+                scd[0] = sc;
+                scd[1] = sc;
             }
         } else if constexpr (KV_MODE == 4) {
             // q4_0 K and V: one (K or V, cell, block) per item - the block's 16 code bytes (2-byte aligned: eight
