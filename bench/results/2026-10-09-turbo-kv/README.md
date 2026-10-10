@@ -94,3 +94,14 @@ small template change; halving the staged rows takes mode 5 to 34.9 KB = 2 block
 reorders the online-softmax sums, so the parity gate re-runs either way. Then norm-fold +
 byte→half2 LUT (shortens the chain, halves F2Fs; math change, parity re-run). Raw-block staging
 (→ ~28 KB, 3 blocks/SM) stays the last, biggest step.
+
+CH=16-for-mode-5 PROBE: NEGATIVE (10/10, reverted). Per-mode chunk (Smem::CH_ = 16 for mode 5,
+34.9 KB = 2 blocks/SM, regs 128 → 72-94): parity PASSed on all tiers, but the kernel got slower -
+turbo4 15.96 -> 18.02 ms/chunk (+13%), turbo2_tcq 14.45 -> 19.51 (+35%), turbo3_tcq +27%, turbo8
+flat. Doubling blocks/SM does not pay when the block's own parallelism halves: at CH=16 the score
+loop runs on warps 0-1 only (warps 2-3 idle), the gather leaves half the threads idle, and every
+per-chunk fixed cost (syncs, softmax, alpha rescale) doubles per unit of work. So the 8.33%
+occupancy ceiling is real but chunk-splitting is the wrong way into it - the occupancy play must
+keep CH=32 and shrink the staged bytes instead (raw-block staging), and the chain shortening
+(norm-fold + byte LUT) attacks the latency directly. Order after this probe: norm-fold + LUT
+first, raw-block staging second.
