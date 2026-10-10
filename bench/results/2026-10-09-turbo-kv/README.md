@@ -100,8 +100,27 @@ CH=16-for-mode-5 PROBE: NEGATIVE (10/10, reverted). Per-mode chunk (Smem::CH_ = 
 turbo4 15.96 -> 18.02 ms/chunk (+13%), turbo2_tcq 14.45 -> 19.51 (+35%), turbo3_tcq +27%, turbo8
 flat. Doubling blocks/SM does not pay when the block's own parallelism halves: at CH=16 the score
 loop runs on warps 0-1 only (warps 2-3 idle), the gather leaves half the threads idle, and every
-per-chunk fixed cost (syncs, softmax, alpha rescale) doubles per unit of work. So the 8.33%
+per-chunk fixed costs (syncs, softmax, alpha rescale) doubles per unit of work. So the 8.33%
 occupancy ceiling is real but chunk-splitting is the wrong way into it - the occupancy play must
 keep CH=32 and shrink the staged bytes instead (raw-block staging), and the chain shortening
 (norm-fold + byte LUT) attacks the latency directly. Order after this probe: norm-fold + LUT
 first, raw-block staging second.
+
+NORM-FOLD + HALF LUTS: COMMITTED 8a50973 (10/10). Gather-only. The block norm (TCQ V side: also
+its alpha) moved out of the per-element chain into the FP32 ks/vs scales the score and p.v paths
+already multiply by; the float codebook copies became half-width tables - turbo4 as a 256-entry
+half2 LUT (one aligned 32-bit read per byte yields both nibbles, no arithmetic), turbo8 and the
+TCQ codebooks pre-rounded halves. Staged rows stay FP16: same 53 KB, still 1 block/SM (regs
+128 -> 96-112, no occupancy claim). Parity ms/chunk (baseline -> new): turbo4 15.96 -> 15.32,
+turbo2_tcq 14.45 -> 13.63, turbo3_tcq 17.04 -> 15.08, turbo1_tcq 13.94 -> 12.82, turbo8 21.63 ->
+21.08. Accuracy improved where the rounding site moved (turbo4 new-vs-FP64 2.24e-05 -> 1.32e-05:
+pre-rounding the codebook once + exact FP32 norm beats rounding the product per element); TCQ
+deltas moved up slightly (pre-rounded codebook), all >=10x inside the bar.
+
+Still 15.3 vs q4_0's 9.1 ms/chunk: the gather's byte loads dominate now. Within one item a
+thread reads 64 consecutive bytes and the tier blocks sit at 66/130-byte strides, so each byte
+load instruction touches ~32 distinct sectors across the warp - the L1 round-trip per element is
+gone but the load-instruction cost is not. That is exactly what raw-block staging removes (stage
+the 132-byte rows once, decode from shared); it stays the last step, and the buun cp.async
+experience (66B strides burned +45-140% there) says measure before believing. The KL receipts in
+this directory predate 8a50973 - re-run the panel before any acceptance claim.
