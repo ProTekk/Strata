@@ -1,0 +1,4 @@
+# The STRATA_LOGPOS dumps regenerate with:
+#   ~/Strata/.venv/bin/python tools/kv_kl_panel.py run
+# The validated table and method live in ../README.md.
+*.logpos
