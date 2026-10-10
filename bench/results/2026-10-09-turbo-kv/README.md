@@ -77,3 +77,20 @@ occupancy half from the 53 KB FP16 rows. A norm-fold alone removes the multiply 
 rounds; a static byte→half2 LUT (possible once the norm is out of the value) removes the 129
 lookups and 64 byte-loads per group-pair down to one table read per byte. ncu still pending for
 the runtime split (stall reasons, L1 hit rate).
+
+ncu (10/10, sudo, mode-5 launches, ctx 32768): LATENCY-BOUND AT 8.33% OCCUPANCY, limited by
+shared memory (Block Limit Shared Mem = 1; registers would allow 4 blocks). One active warp per
+scheduler, 81.7% of cycles with no eligible warp, one instruction issued every 5.5 cycles per
+scheduler. DRAM 1.18% — nothing is bandwidth-starved; L1/TEX 46% — the codebook lookups do hit
+L1 (94a8649 worked), the gather is L1-latency-bound on its dependent chain (byte-load → lookup →
+F2F → STS) with four warps per SM to hide it. turbo8: 55.9% mem / 35.4% SM; turbo4: 45.7% /
+44.7%; both 8.33% occupancy. q4_0 (mode 4) was not in the captured window; its 2 blocks/SM =
+16.7% is still low, but its gather chain is ~10 loads long instead of ~230.
+
+Implication for the experiment order: occupancy is the structural lever (4 warps/SM cannot hide
+any chain), instruction-count reduction is the secondary one. Cheapest probe first: a per-mode
+chunk of 16 cells (D1_CH is already a build knob, but it is global — a mode-5-only chunk needs a
+small template change; halving the staged rows takes mode 5 to 34.9 KB = 2 blocks/SM). Chunking
+reorders the online-softmax sums, so the parity gate re-runs either way. Then norm-fold +
+byte→half2 LUT (shortens the chain, halves F2Fs; math change, parity re-run). Raw-block staging
+(→ ~28 KB, 3 blocks/SM) stays the last, biggest step.
