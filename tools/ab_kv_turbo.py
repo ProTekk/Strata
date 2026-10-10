@@ -165,10 +165,31 @@ def main():
     rows = [json.loads(l) for l in open(a.out)]
     print(f"\n{'case':10s} " + " ".join(f"{arm:>12s}" for arm in arms))
     for case in sorted({r["case"] for r in rows}, key=lambda c: (c.split("@")[0], c)):
+        if case.startswith("needle"):      # needle records hold text lines, not a rate - summarized below
+            continue
         line = f"{case:10s} "
         for arm in arms:
-            vals = [r["tg"] or r["pp"] for r in rows if r["arm"] == arm and r["case"] == case and (r.get("tg") or r.get("pp"))]
+            vals = [(r.get("tg") or r.get("pp")) for r in rows
+                    if r["arm"] == arm and r["case"] == case and (r.get("tg") or r.get("pp"))]
             line += f"{statistics.median(vals):12.1f}" if vals else f"{'-':>12s}"
+        print(line)
+    # TTFT medians (client-measured, seconds)
+    print(f"\n{'case':10s} " + " ".join(f"{arm + ' TTFT':>12s}" for arm in arms))
+    for case in sorted({r["case"] for r in rows if not r["case"].startswith("needle")}):
+        line = f"{case:10s} "
+        for arm in arms:
+            vals = [r["ttft_s"] for r in rows if r["arm"] == arm and r["case"] == case and r.get("ttft_s")]
+            line += f"{statistics.median(vals):12.2f}" if vals else f"{'-':>12s}"
+        print(line)
+    # needle: found-rate per arm per length (a needle line counts as found when it ends in OK/YES; see the raw
+    # lines in the JSONL for the per-depth detail)
+    print(f"\n{'needle':10s} " + " ".join(f"{arm:>12s}" for arm in arms))
+    for case in sorted({r["case"] for r in rows if r["case"].startswith("needle")}):
+        line = f"{case:10s} "
+        for arm in arms:
+            lines = [l for r in rows if r["arm"] == arm and r["case"] == case for l in r.get("needle", []) if "depth" in l]
+            found = sum(1 for l in lines if ": FOUND" in l)
+            line += f"{found:5d}/{len(lines):<6d}" if lines else f"{'-':>12s}"
         print(line)
 
 
