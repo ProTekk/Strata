@@ -66,3 +66,14 @@ Profile the mode-5 kernel (occupancy vs gather-instruction cost) before optimizi
 change at a time (norm folding out of the gather into the ks/vs scale path is the smallest
 measurable step; raw-block K staging is the occupancy play and stays separate). No occupancy
 claim for norm folding — the FP16 rows do not change size.
+
+Static SASS (cuobjdump -sass, shipped objects, 10/10): the gather dominates the instruction mix.
+Per kernel: mode 4 (q4_0) 1936 instructions with 10 global loads (46-bit-field vector loads, 9
+U16 scales); mode 5 turbo4 2456 with 230 loads — 64 LDG.E.U8 (one byte-load per code byte, the
+unaligned 66 B stride forbids vectors) + 129 LDG.E (the per-nibble codebook lookups) + 122 F2F
+(float→half rounds); mode 5 turbo2tcq 3072 (bitstream unpacking on top). The MMA/softmax body is
+the same code across modes, so the delta is the gather: instruction-bound, on top of the
+occupancy half from the 53 KB FP16 rows. A norm-fold alone removes the multiply and half the F2F
+rounds; a static byte→half2 LUT (possible once the norm is out of the value) removes the 129
+lookups and 64 byte-loads per group-pair down to one table read per byte. ncu still pending for
+the runtime split (stall reasons, L1 hit rate).
