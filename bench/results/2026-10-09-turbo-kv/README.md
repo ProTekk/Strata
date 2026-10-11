@@ -132,3 +132,26 @@ table above stands as the turbo-format quality receipt (the KV encode path is un
 the gather's rounding move is covered by the parity suite, where it passed with improved
 accuracy. Harness note: `run` trusts existing dumps (resume-after-crash); after a binary
 rebuild, clear kl/*.logpos first - the panel prints per-arm progress lines only when it runs.
+
+END-TO-END A/B POST-KERNEL (ab_post_kernel.jsonl, 10/10 20:06, 1 round, same prompts as the
+10/09 baseline - prompt_n identical: 14,952 / 44,041 / 205,922):
+
+case         q4_0 PP   turbo4 PP   turbo2 PP   turbo4 vs q4   turbo2 vs q4
+pp@32K       1964      1692        1743        -13.9%           -11.3%
+tg@46080     2063      1554        1806        -24.7%           -12.5%
+tg@250000    1925      1662        1696        -13.6%           -11.9%
+
+TG: turbo4 47.2/57.7/51.2 vs q4_0 47.2/52.9/52.3 (parity at 4K and 206K, +9% at 44K);
+turbo2tcq within 1-2%. Needle 3/3 at 32K and 128K on all three arms. TTFT tracks PP.
+
+Baseline caveat: the jump vs the 10/09 run (turbo4 PP -29.6% -> -13.9%, tg@4096 42.2 -> 54.2)
+is bigger than 8a50973's 4% kernel gain, and tg@4096 runs through the decode kernel, which no
+change between the runs touched. The 10/09 binary's exact state is unverifiable after the fact
+(build dir overwritten); the likeliest explanation is that it predated part of the port's
+gather work. Treat ab_post_kernel.jsonl as the baseline from here; the 10/09 ab.jsonl stands
+only as history.
+
+Position: TG at parity, PP -11 to -14% (understood: the gather's byte-load instructions at
+66/130-byte strides; kernel 15.3 vs 9.1 ms/chunk), quality at q4_0 parity (turbo4), retrieval
+clean. Raw-block staging is the only remaining lever and carries the buun cp.async warning;
+it is now an optimization-for-diminishing-returns, not a blocker.
