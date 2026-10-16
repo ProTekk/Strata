@@ -1,0 +1,36 @@
+{"round": 1, "arm": "q4_0", "case": "tg@4096", "ttft_s": 5.793686375000107, "prompt_n": 3973, "predicted_n": 41, "tg": 41.8, "pp": 691.7, "draft_n": 38, "draft_n_accepted": 17}
+{"round": 1, "arm": "q4_0", "case": "tg@46080", "ttft_s": 21.59951283999999, "prompt_n": 44041, "predicted_n": 40, "tg": 60.8, "pp": 2042.7, "draft_n": 24, "draft_n_accepted": 19}
+{"round": 1, "arm": "q4_0", "case": "tg@250000", "ttft_s": 107.09443356600059, "prompt_n": 205922, "predicted_n": 52, "tg": 54.5, "pp": 1925.2, "draft_n": 41, "draft_n_accepted": 26}
+{"round": 1, "arm": "q4_0", "case": "pp@32K", "ttft_s": 7.6112634199998865, "prompt_n": 14952, "pp": 1974.6}
+{"round": 1, "arm": "q4_0", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 17 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 15 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 15 s)", "3 of 3 found"]}
+{"round": 1, "arm": "q4_0", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 60 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 60 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 53 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo4", "case": "tg@4096", "ttft_s": 5.187440542000331, "prompt_n": 3973, "predicted_n": 33, "tg": 44.5, "pp": 773.6, "draft_n": 17, "draft_n_accepted": 12}
+{"round": 1, "arm": "turbo4", "case": "tg@46080", "ttft_s": 24.73253990900048, "prompt_n": 44041, "predicted_n": 42, "tg": 64.4, "pp": 1783.3, "draft_n": 24, "draft_n_accepted": 22}
+{"round": 1, "arm": "turbo4", "case": "tg@250000", "ttft_s": 123.15933012799997, "prompt_n": 205922, "predicted_n": 52, "tg": 54.8, "pp": 1673.6, "draft_n": 37, "draft_n_accepted": 24}
+{"round": 1, "arm": "turbo4", "case": "pp@32K", "ttft_s": 8.79713664099927, "prompt_n": 14952, "pp": 1705.0}
+{"round": 1, "arm": "turbo4", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 19 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 18 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 18 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo4", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 70 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 70 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 62 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo2tcq", "case": "tg@4096", "ttft_s": 10.02153842700045, "prompt_n": 3973, "predicted_n": 36, "tg": 45.3, "pp": 397.3, "draft_n": 13, "draft_n_accepted": 13}
+{"round": 1, "arm": "turbo2tcq", "case": "tg@46080", "ttft_s": 24.00198212899977, "prompt_n": 44041, "predicted_n": 44, "tg": 62.0, "pp": 1837.6, "draft_n": 26, "draft_n_accepted": 23}
+{"round": 1, "arm": "turbo2tcq", "case": "tg@250000", "ttft_s": 119.31685426900003, "prompt_n": 205922, "predicted_n": 41, "tg": 63.2, "pp": 1727.6, "draft_n": 21, "draft_n_accepted": 18}
+{"round": 1, "arm": "turbo2tcq", "case": "pp@32K", "ttft_s": 8.54908824999984, "prompt_n": 14952, "pp": 1754.8}
+{"round": 1, "arm": "turbo2tcq", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 18 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 17 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 18 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo2tcq", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 69 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 69 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 60 s)", "3 of 3 found"]}
+{"round": 2, "arm": "turbo2tcq", "case": "tg@4096", "ttft_s": 10.541703400999722, "prompt_n": 3973, "predicted_n": 36, "tg": 44.4, "pp": 377.7, "draft_n": 13, "draft_n_accepted": 13}
+{"round": 2, "arm": "turbo2tcq", "case": "tg@46080", "ttft_s": 24.217039535999902, "prompt_n": 44041, "predicted_n": 44, "tg": 61.5, "pp": 1821.6, "draft_n": 26, "draft_n_accepted": 23}
+{"round": 2, "arm": "turbo2tcq", "case": "tg@250000", "ttft_s": 119.24459239799944, "prompt_n": 205922, "predicted_n": 41, "tg": 63.4, "pp": 1728.8, "draft_n": 21, "draft_n_accepted": 18}
+{"round": 2, "arm": "turbo2tcq", "case": "pp@32K", "ttft_s": 8.491939920999357, "prompt_n": 14952, "pp": 1766.6}
+{"round": 2, "arm": "turbo2tcq", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 18 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 17 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 17 s)", "3 of 3 found"]}
+{"round": 2, "arm": "turbo2tcq", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 69 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 68 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 60 s)", "3 of 3 found"]}
+{"round": 2, "arm": "turbo4", "case": "tg@4096", "ttft_s": 10.391012139998566, "prompt_n": 3973, "predicted_n": 33, "tg": 41.1, "pp": 383.1, "draft_n": 17, "draft_n_accepted": 12}
+{"round": 2, "arm": "turbo4", "case": "tg@46080", "ttft_s": 24.67713596900103, "prompt_n": 44041, "predicted_n": 42, "tg": 64.6, "pp": 1787.3, "draft_n": 24, "draft_n_accepted": 22}
+{"round": 2, "arm": "turbo4", "case": "tg@250000", "ttft_s": 123.18346559800011, "prompt_n": 205922, "predicted_n": 52, "tg": 51.4, "pp": 1673.4, "draft_n": 37, "draft_n_accepted": 24}
+{"round": 2, "arm": "turbo4", "case": "pp@32K", "ttft_s": 8.873331761998998, "prompt_n": 14952, "pp": 1690.5}
+{"round": 2, "arm": "turbo4", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 19 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 18 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 18 s)", "3 of 3 found"]}
+{"round": 2, "arm": "turbo4", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 71 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 71 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 63 s)", "3 of 3 found"]}
+{"round": 2, "arm": "q4_0", "case": "tg@4096", "ttft_s": 4.858302141999957, "prompt_n": 3973, "predicted_n": 41, "tg": 44.6, "pp": 821.3, "draft_n": 38, "draft_n_accepted": 17}
+{"round": 2, "arm": "q4_0", "case": "tg@46080", "ttft_s": 21.45131525599936, "prompt_n": 44041, "predicted_n": 40, "tg": 64.7, "pp": 2056.4, "draft_n": 24, "draft_n_accepted": 19}
+{"round": 2, "arm": "q4_0", "case": "tg@250000", "ttft_s": 106.55884831399999, "prompt_n": 205922, "predicted_n": 52, "tg": 57.2, "pp": 1934.7, "draft_n": 41, "draft_n_accepted": 26}
+{"round": 2, "arm": "q4_0", "case": "pp@32K", "ttft_s": 7.600843063999491, "prompt_n": 14952, "pp": 1975.0}
+{"round": 2, "arm": "q4_0", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,778 prompt tokens, 16 s)", "  32k depth  50%: FOUND  (32,778 prompt tokens, 15 s)", "  32k depth  90%: FOUND  (32,779 prompt tokens, 15 s)", "3 of 3 found"]}
+{"round": 2, "arm": "q4_0", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (125,045 prompt tokens, 60 s)", " 128k depth  50%: FOUND  (125,045 prompt tokens, 60 s)", " 128k depth  90%: FOUND  (125,046 prompt tokens, 53 s)", "3 of 3 found"]}
