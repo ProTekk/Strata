@@ -149,10 +149,24 @@ mode-5 prompt gather (+647 ms GPU at 32K) - raw-block staging territory.
 5. ~~Encode cooperative rewrite~~ DONE (e2b45452): warp-per-group with the serial chains on lane 0
    - 1652.5 -> 17.5 ms, bitwise, PP penalty -8.4..-9.4% -> -4.1..-4.8%. The buun-flat alternative
    was not needed.
-6. NEW - decode-side tables: qsa_decode_attn.cu reads c_tq* from __constant__ memory with
-   data-divergent indices (serialized replays per unique address). The prompt gather fixed exactly
-   this in 94a8649 with __device__ L1 tables; the decode kernel never got the same treatment. The
-   residual TG lag (-1.7..-4.6% with matched draft acceptances, worst at 250K where the cell
-   count is huge) points here. Value-identical conversion, so bitwise by construction; measure TG.
+6. ~~Decode-side tables~~ DONE (1b61b630): qsa_decode_attn.cu's c_tq* codebooks moved from
+   __constant__ to __device__ globals (divergent indices serialize constant-cache replays; the
+   prompt gather escaped this in 94a8649). Value-identical, bitwise by construction; the parity
+   harness's old path IS this kernel: turbo2_tcq decode reference 58.1 -> 38.0 ms/chunk (-34.5%),
+   turbo4 flat (a 16-entry table was already cheap in the constant cache). Receipts: parity 12/12
+   + kv_turbo_parity bitwise + ctest 20/20 + turbo4 smoke + needle 6/6 (incl. 3 at 125K on the
+   final binary). The residual TG band (-1.7..-4.6%, matched acceptances) is decode-attention-
+   adjacent for turbo4 no more - its fused decode reference costs the same as q4_0's (34.8 vs
+   34.6 ms); treat TG as parity within draft variance until a 3-round run says otherwise.
+7. NEW - rotation fusion (the +97 ms rotate slice): turbo_rotate128 is bandwidth-bound at DRAM
+   peak (~1 TB/s effective on the Q rows) - kernel shape cannot help; only fusing the forward
+   rotation into prompt_attn's q staging and the inverse into its epilogue removes the global
+   round trips. Bitwise path exists (all three FWHT forms share the proven stage order), but the
+   staging restructure is real surgery - candidate, not committed work.
+8. Gather LUT micro-variants (cheap experiments while #4 is undecided): the 64 divergent LUT
+   LDGs per item could become a 1 KB smem copy (LDS; +1 KB keeps 1 block/SM) or a 16-entry
+   register table read via shfl (zero memory ops, +ALU). At 8.3% occupancy the issue slots are
+   free and the memory latency is the wall - the shfl variant is the interesting one. Judge by
+   qsa_prompt_attn_parity ms/chunk (2.5-min runs), keep only a clear win.
 - The 10/09 ab.jsonl and the 10/10 ab_post_kernel.jsonl stand as history; the q4_0 baseline moved
   with the engine (TG +10-15% upstream), so cross-session comparisons use each session's own q4_0.
