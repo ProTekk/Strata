@@ -1,0 +1,12 @@
+{"variant": "A_700_auto", "case": "tg@46080", "boot_s": 32.0, "prompt_n": 44041, "pp": 2528.7, "tg": 79.9, "draft_n": 29, "draft_acc": 20}
+{"variant": "A_700_auto", "case": "tg@250000", "boot_s": 32.0, "prompt_n": 205922, "pp": 2275.6, "tg": 84.7, "draft_n": 26, "draft_acc": 21}
+{"variant": "A_700_auto", "case": "meta", "slots_line": "expert cache auto: 14.66 GiB free, 700 MiB reserved (+218 MiB for the draft head) -> 5551 slots", "warnings": 1}
+{"variant": "B_896_auto", "case": "tg@46080", "boot_s": 30.0, "prompt_n": 44041, "pp": 2530.0, "tg": 81.3, "draft_n": 25, "draft_acc": 20}
+{"variant": "B_896_auto", "case": "tg@250000", "boot_s": 30.0, "prompt_n": 205922, "pp": 2276.6, "tg": 82.7, "draft_n": 26, "draft_acc": 21}
+{"variant": "B_896_auto", "case": "meta", "slots_line": "expert cache auto: 14.66 GiB free, 896 MiB reserved (+218 MiB for the draft head) -> 5474 slots", "warnings": 0}
+{"variant": "C_896_w23", "case": "tg@46080", "boot_s": 28.0, "prompt_n": 44041, "pp": 2535.8, "tg": 78.9, "draft_n": 25, "draft_acc": 20}
+{"variant": "C_896_w23", "case": "tg@250000", "boot_s": 28.0, "prompt_n": 205922, "pp": 2277.4, "tg": 81.6, "draft_n": 26, "draft_acc": 21}
+{"variant": "C_896_w23", "case": "meta", "slots_line": "expert cache auto: 14.66 GiB free, 896 MiB reserved (+218 MiB for the draft head) -> 5474 slots", "warnings": 0}
+{"variant": "D_896_w31", "case": "tg@46080", "boot_s": 28.0, "prompt_n": 44041, "pp": 2530.3, "tg": 74.4, "draft_n": 25, "draft_acc": 20}
+{"variant": "D_896_w31", "case": "tg@250000", "boot_s": 28.0, "prompt_n": 205922, "pp": 2274.9, "tg": 80.0, "draft_n": 26, "draft_acc": 21}
+{"variant": "D_896_w31", "case": "meta", "slots_line": "expert cache auto: 14.66 GiB free, 896 MiB reserved (+218 MiB for the draft head) -> 5474 slots", "warnings": 0}
