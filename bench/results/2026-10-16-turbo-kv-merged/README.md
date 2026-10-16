@@ -192,6 +192,52 @@ the two reliable cases) at 4.125 bpv vs 4.5 - the KV footprint and streaming-tra
 now free.** Session arc: -13..-14% -> -8.4..-9.4% (wide loads + 32-thread append) -> -4.1..-4.8%
 (coop encode) -> parity (raw-block staging). Every step bitwise against the parity gates.
 
+## The drafter goes turbo (d1dd2aaf) - Phase 2 closed, the footprint win lands
+
+The MTP drafter's INT8 KV fallback was eating the entire main-pool saving: its ring is 1024 B/cell
+vs turbo4's 528. The fallback existed because the port's Phase 1 scoped the drafter out - but its
+identity-ids read IS qsa_decode_attn_batch (KV_MODE 4 covers every tier since the port); only the
+mtp.cpp wiring was missing: kv_append_turbo_steps/step seams (batched + per-token, mirroring
+verify.cpp) and the rotate pair in record_rest (forward128 on q, inverse128 on the attention out,
+2 groups/head). prefill.cpp's draft-fill branch came alive (it was there, dead under the fallback);
+snapshot/stream were already fmt-aware.
+
+Measured (huihui-iq3_s pack, live config, 262K context, same-engine q4_0 control):
+
+| | q4_0 (live) | turbo4 + INT8 drafter | turbo4 drafter |
+|---|---:|---:|---:|
+| draft layer | 978 MiB | 1098 MiB | **966 MiB** |
+| expert cache free | 14.51 GiB | 14.53 GiB | **14.66 GiB** |
+| expert slots | 5489 | 5499 | **5551** |
+| idle VRAM | 23667 MiB | 23811 MiB | 23669 MiB |
+
+The full accounting of "what does turbo4 buy on this rig": the model is hybrid - 12 of 48 layers
+hold KV (full_attention_interval 4) - so the main pool is only 1.69 GiB (q4_0) vs 1.55 (turbo4),
+a 144 MiB saving; the turbo drafter adds 12 MiB more vs q4_0's. Total +157 MiB to the expert
+cache = +62 slots (~+1%). The footprint win is real but modest at 262K on a 12-KV-layer model;
+it scales with max_context and matters most on KV-bound cards/configs. Functional: ctest 20/20,
+parity green, smoke acceptance 20/22, coherent at 100K depth (pp 2529, unchanged).
+
+## Drafter-turbo A/B (ab_drafter_turbo.jsonl, 1 round, q4_0 + turbo4)
+
+| case | q4_0 | turbo4 (turbo drafter) | delta |
+|---|---:|---:|---:|
+| pp@32K | 2020.2 | 2043.9 | +1.2% |
+| pp@46080 | 2104.7 | 2127.5 | +1.1% |
+| pp@250K | 1962.7 | 1986.7 | +1.2% |
+| tg@4096 | 45.6 | 55.0 | (q4_0 draft 17/38 - a bad-luck round) |
+| tg@46080 | 66.8 | 60.9 | (acceptances 19/24 vs 19/26 - variance) |
+| tg@250K | 58.8 | 57.7 | -1.9% |
+| TTFT 32K/46K/250K | 7.43/20.96/105.04 | 7.34/20.74/103.77 | turbo4 ahead on all |
+
+Drafter acceptance with the turbo4 KV: 0.75 / 0.73 / 0.68 - the same band as the INT8-drafter
+rounds (0.71 / 0.83 / 0.67): halving the drafter KV precision cost nothing measurable. Needle
+3/3 both arms both lengths. PP is now +1.1..+1.2% (turbo4 slightly AHEAD of q4_0 on every
+reliable case). Final position: at 262K on this hybrid model turbo4 gives a ~157 MiB footprint
+saving (+62 expert slots), PP/TTFT parity-or-better, TG parity within draft variance, and the
+quality gate from 10/10 (KL at q4_0 parity) still stands - the encode path has been bitwise
+unchanged since.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
@@ -218,7 +264,9 @@ now free.** Session arc: -13..-14% -> -8.4..-9.4% (wide loads + 32-thread append
    rotation into prompt_attn's q staging and the inverse into its epilogue removes the global
    round trips. Bitwise path exists (all three FWHT forms share the proven stage order), but the
    staging restructure is real surgery - candidate, not committed work.
-8. Gather LUT micro-variants: BOTH MEASURED NEGATIVE (10/16, reverted; bitwise in both cases -
+8. ~~Drafter turbo KV~~ DONE (d1dd2aaf): the INT8 fallback is retired; draft layer 966 MiB, +62
+   expert slots vs q4_0. See the section above; the TG/acceptance receipt is the A/B below it.
+9. Gather LUT micro-variants: BOTH MEASURED NEGATIVE (10/16, reverted; bitwise in both cases -
    NEWHASHes unchanged). (a) smem table copy (0.5-2 KB static, LDS instead of divergent L1 LDG):
    turbo4 12.70 -> 12.55 (-1.7%, marginal), turbo8 15.27 -> 16.65 (+9% - the extra LDS contends
    with the score loop's own smem traffic), TCQ +1..+4%. (b) turbo4-only 16-entry register table
