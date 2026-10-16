@@ -559,7 +559,12 @@ void launch_append(const float* kcur, const float* vcur, const int32_t* step, in
     const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / 128), (unsigned) (n_steps * planes));
     const KvHostPools p = pools ? *pools : KvHostPools{}, h = host ? *host : KvHostPools{},
                              st = stage ? *stage : KvHostPools{};
-    kv_append_turbo_kernel<TIER><<<grid, 256, 0, (cudaStream_t) stream>>>(
+    // TCQ needs the 256-thread Viterbi body; the vanilla tiers' thread-0 body does not - a 256-thread block
+    // there reserves 255 regs x 256 threads = the whole SM register file (ONE block/SM, one working warp),
+    // and 255/256 of the threads only exist to idle. 32-thread blocks fit 8 per SM: same math, same thread-0
+    // work, 8x the active warps (nsys: the encode was 67% of turbo4's PP penalty).
+    constexpr int kThreads = (TIER >= kTurbo3Tcq) ? 256 : 32;
+    kv_append_turbo_kernel<TIER><<<grid, kThreads, 0, (cudaStream_t) stream>>>(
         kcur, vcur, step, step_stride, planes, pos0, page_table, (int) s.n_head_kv, (int) s.head_dim,
         (int) s.page_size, p, h, st);
     check("kv_append_turbo launch");
