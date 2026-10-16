@@ -155,3 +155,33 @@ Position: TG at parity, PP -11 to -14% (understood: the gather's byte-load instr
 66/130-byte strides; kernel 15.3 vs 9.1 ms/chunk), quality at q4_0 parity (turbo4), retrieval
 clean. Raw-block staging is the only remaining lever and carries the buun cp.async warning;
 it is now an optimization-for-diminishing-returns, not a blocker.
+
+NEXT-STEP BACKLOG (10/10, after the post-kernel A/B)
+
+Verified paths (evidence-backed, in order):
+1. Confirm the 44K outlier (turbo4 -24.7% at tg@46080, one round; turbo2tcq -12.5% there,
+   -11..-12% everywhere else). ~35 min GPU. If it reproduces, look at the kv_resident=32768
+   streaming boundary first (44,041 is the only case that crosses it).
+2. Decompose the PP gap: ncu on the PP path, turbo4 vs q4_0 - the encode (FWHT+quantize, a
+   per-token cost q4_0 does not pay) vs gather split decides where remaining effort goes.
+   Kernel math says gather alone should not eat -12% at 32K. ~30 min GPU.
+3. Wide loads in the gather (narrow staging): floor-aligned uint4 + funnel shifts inside the
+   contiguous code-byte run; 64 byte-loads -> ~17 wide loads per group. No smem, no layout,
+   no math change; instruction count provable from SASS. Next real code change.
+4. Raw-block staging (big lever): 53 KB -> ~28 KB -> 3 blocks/SM + decode from shared.
+   For: ncu (smem sole limiter) + SASS (load instructions) + turbo2tcq beating turbo4 at PP
+   (36B vs 66B blocks corroborates). Against: buun cp.async +53..140% at these exact strides.
+   Only after 2 and 3.
+5. Encode side: if 2 finds encode material, check for a cooperative multi-thread encode path
+   (buun set-rows was 13x).
+
+Theories / rabbit holes:
+- 44K resident-tier interaction (see 1; noise wearing a trench coat until it reproduces).
+- The 10/09 baseline was a different binary (see caveat above) - some "wins" may be
+  restorations. Unverifiable; history only.
+- cp.async staging of raw blocks: what burned +45..140% in buun at 66/130B strides.
+- Double-buffered gather/score overlap: doubles the smem ncu says is the limiter. Dead on math.
+- Decode straight into MMA fragments (buun fattn-mma-turbo design): the endgame, weeks of work.
+- FP8/FP4 staged rows: re-moves the rounding site 8a50973 just improved. Not worth it.
+- Verified dead ends, do not revisit: CH=16 (measured negative), register cuts/launch_bounds
+  (smem is the limiter), __constant__ LUTs (divergent indices serialize).
