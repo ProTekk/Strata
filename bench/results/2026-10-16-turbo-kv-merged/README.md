@@ -106,16 +106,53 @@ vs 17/38, 19/24, 26/41 - single-round draft variance around the 2-round baseline
 tg@4096 pp column is the known cold file-tier confound again (333.5/426.5 - not a result).
 Needle 3/3 on every arm. TTFT@250K: 105.5 / 115.2 (+9.2%, was +15.3%) / 119.4 s.
 
+## The warp-cooperative vanilla encode (e2b45452) and its A/B (ab_coop_encode.jsonl, 1 round)
+
+The 32-thread fix had only halved the encode because the deeper shape problem remained: one
+working thread per group with x[128] in registers (REG 255 + 608-640 B spill), the whole
+pipeline RE-RUN per destination (pool+host+stage = up to 3x on the streaming prompt path), and
+the kernel's static smem (the TCQ body's 21.5 KB) capping it at 2-4 blocks/SM. The rewrite:
+8 groups per 256-thread block, one warp per group, coalesced float4 load, the two serial norm
+chains kept as buun's exact left folds on lane 0, the FWHT in the already-proven bitwise shuffle
+stage order, one quantize result stored to every destination as aligned u16s. TCQ untouched.
+
+Receipts: kv_turbo_parity bitwise on both vanilla tiers; REG 32/38, STACK 0, LOCAL 0; nsys 32K
+prompt: kv_append_turbo 1652.5 -> 887.0 -> **17.5 ms** per 48 launches - the turbo encode is now
+5x cheaper than q4_0's own append (90.0 ms). qsa_prompt_attn_parity 12/12, ctest subset green.
+
+| case | q4_0 | turbo4 | turbo2tcq | t4 vs q4 | (pre-coop t4 vs q4) |
+|---|---:|---:|---:|---:|---:|
+| pp@32K | 2016.4 | 1918.9 | 1779.4 | **-4.8%** | -8.4% |
+| pp@46080 | 1766.9 | 1683.0 | 1847.0 | **-4.7%** | -9.4% |
+| pp@250K | 1963.2 | 1883.3 | 1733.0 | **-4.1%** | -8.4% |
+
+(The 46080 case ran slow for every arm this round - absolute pp wobbles with machine state; the
+same-round control is the comparison. turbo2tcq is flat within noise, as expected: the TCQ
+encoder was not touched - it doubles as a second control.) TG: 47.7/64.2/56.4 vs q4_0
+48.5/66.6/59.1 (-1.7/-3.6/-4.6%) with near-identical draft acceptances (19/23 vs 19/24, 24/36
+vs 26/41) - the residual TG lag now points at the decode path, where qsa_decode_attn.cu still
+reads its codebook tables from __constant__ memory with data-divergent indices (serialized
+replays; the prompt gather escaped exactly this in 94a8649 via __device__ L1 tables). Needle
+3/3 all arms; TTFT@250K 105.0 / 109.5 (+4.2%) / 118.9.
+
+Session arc of turbo4's PP penalty vs q4_0: -13..-14% (at merge) -> -8.4..-9.4% (wide loads +
+32-thread blocks) -> **-4.1..-4.8%** (cooperative encode). Remaining PP penalty is ~86% the
+mode-5 prompt gather (+647 ms GPU at 32K) - raw-block staging territory.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
 2. ~~PP decomposition~~ DONE (nsys; encode 67% -> 51% after the launch fix).
 3. ~~Wide loads~~ DONE (committed, bitwise, -16% kernel).
-4. Raw-block staging (53 -> ~28 KB, 3 blocks/SM): still open, now attacking a 38%-of-penalty
-   slice; buun cp.async warning stands.
-5. Encode cooperative rewrite: NOW THE TOP LEVER (51% of the remaining penalty, the spill is
-   measured). Design choice open: warp-per-group with shared x[] (bitwise-preserving, the FWHT
-   shuffle form is already proven equal) vs buun-flat threads-per-group with the spill (simplest,
-   buun's shipped shape).
+4. Raw-block staging (53 -> ~28 KB, 3 blocks/SM): NOW THE TOP PP LEVER - the mode-5 gather is
+   ~86% of the remaining penalty (+647 ms GPU at 32K). Buun cp.async warning stands.
+5. ~~Encode cooperative rewrite~~ DONE (e2b45452): warp-per-group with the serial chains on lane 0
+   - 1652.5 -> 17.5 ms, bitwise, PP penalty -8.4..-9.4% -> -4.1..-4.8%. The buun-flat alternative
+   was not needed.
+6. NEW - decode-side tables: qsa_decode_attn.cu reads c_tq* from __constant__ memory with
+   data-divergent indices (serialized replays per unique address). The prompt gather fixed exactly
+   this in 94a8649 with __device__ L1 tables; the decode kernel never got the same treatment. The
+   residual TG lag (-1.7..-4.6% with matched draft acceptances, worst at 250K where the cell
+   count is huge) points here. Value-identical conversion, so bitwise by construction; measure TG.
 - The 10/09 ab.jsonl and the 10/10 ab_post_kernel.jsonl stand as history; the q4_0 baseline moved
   with the engine (TG +10-15% upstream), so cross-session comparisons use each session's own q4_0.
