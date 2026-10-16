@@ -73,7 +73,7 @@ def stream_ttft(port: int, payload: dict) -> tuple[dict, float | None]:
     return rec, ttft
 
 
-def arm_config(kv: str, port: int) -> Path:
+def arm_config(kv: str, port: int, s_dir: Path) -> Path:
     cfg = json.loads(LIVE.read_text())
     cfg["exe"] = str(ENGINE)
     a = cfg["args"]
@@ -81,9 +81,9 @@ def arm_config(kv: str, port: int) -> Path:
     a[i + 1] = kv
     cfg["reasoning_budget_tokens"] = 512          # answers, not truncated thinking
     cfg["model_name"] = f"ab-{kv}"
-    cfg["log"] = str(S / f"server-{kv}.log")
+    cfg["log"] = str(s_dir / f"server-{kv}.log")
     cfg["port"] = port
-    p = S / f"cfg-{kv}.json"
+    p = s_dir / f"cfg-{kv}.json"
     p.parent.mkdir(parents=True, exist_ok=True)
     p.write_text(json.dumps(cfg, indent=1))
     return p
@@ -103,8 +103,8 @@ def wait_ready(port: int, proc: subprocess.Popen, timeout: float = 1200) -> None
     raise TimeoutError("server did not come up")
 
 
-def one_arm_round(kv: str, port: int, out, rounds: int, round_i: int) -> None:
-    cfg = arm_config(kv, port)
+def one_arm_round(kv: str, port: int, out, rounds: int, round_i: int, s_dir: Path) -> None:
+    cfg = arm_config(kv, port, s_dir)
     proc = subprocess.Popen([str(PY), str(STRATA / "serve" / "server.py"), "--engine", "strata",
                              "--config", str(cfg), "--port", str(port)],
                             cwd=str(STRATA), stdout=subprocess.DEVNULL, stderr=subprocess.STDOUT)
@@ -151,18 +151,21 @@ def main():
     ap.add_argument("--rounds", type=int, default=3)
     ap.add_argument("--arms", default="q4_0,turbo4,turbo2tcq")
     ap.add_argument("--port", type=int, default=8090)
-    ap.add_argument("--out", default=str(S / "ab.jsonl"))
+    ap.add_argument("--dir", default=str(S), help="results dir for the generated cfgs/server logs")
+    ap.add_argument("--out", default=None, help="JSONL path (default: <dir>/ab.jsonl)")
     a = ap.parse_args()
     arms = a.arms.split(",")
-    S.mkdir(parents=True, exist_ok=True)
-    with open(a.out, "a") as out:
+    s_dir = Path(a.dir).resolve()   # absolute: the log path enters the cfg, which the serve wrapper opens from its own cwd
+    s_dir.mkdir(parents=True, exist_ok=True)
+    out_path = a.out if a.out else str(s_dir / "ab.jsonl")
+    with open(out_path, "a") as out:
         for rnd in range(1, a.rounds + 1):
             order = arms if rnd % 2 else list(reversed(arms))     # alternate to spread drift
             for kv in order:
                 print(f"round {rnd} arm {kv}", flush=True)
-                one_arm_round(kv, a.port, out, a.rounds, rnd)
+                one_arm_round(kv, a.port, out, a.rounds, rnd, s_dir)
     # medians
-    rows = [json.loads(l) for l in open(a.out)]
+    rows = [json.loads(l) for l in open(out_path)]
     print(f"\n{'case':10s} " + " ".join(f"{arm:>12s}" for arm in arms))
     for case in sorted({r["case"] for r in rows}, key=lambda c: (c.split("@")[0], c)):
         if case.startswith("needle"):      # needle records hold text lines, not a rate - summarized below
