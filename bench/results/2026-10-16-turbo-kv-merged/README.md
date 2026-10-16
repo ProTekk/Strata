@@ -238,6 +238,30 @@ saving (+62 expert slots), PP/TTFT parity-or-better, TG parity within draft vari
 quality gate from 10/10 (KL at q4_0 parity) still stands - the encode path has been bitwise
 unchanged since.
 
+## Config probe: vram-reserve and pool-workers (config_probe.jsonl, 10/16 evening)
+
+Prompted by the r/LocalLLaMA "Strata performance finetuning" thread (u/Dreeew84, 2x3060). Four
+boots of the turbo4 huihui config, tg@46080 (256 tok) + tg@250K (128 tok) each:
+
+| variant | tg@46K | tg@250K | pp@250K | #2065 warnings | slots |
+|---|---:|---:|---:|---:|---:|
+| A: reserve 700, workers auto(15) | 79.9 | 84.7 | 2275.6 | 1 | 5551 |
+| B: reserve 896, workers auto | 81.3 | 82.7 | 2276.6 | 0 | 5474 |
+| C: 896, workers 23 | 78.9 | 81.6 | 2277.4 | 0 | 5474 |
+| D: 896, workers 31 | 74.4 | 80.0 | 2274.9 | 0 | 5474 |
+
+ADOPTED: --vram-reserve-mib 896 (engine's own ask; kills the warnings; PP identical to the digit,
+TG within noise; costs 77 slots ~1.4%). Applied to strata-huihui-iq3_s-turbo4.json AND the live
+strata-huihui-iq3_s.json. REJECTED: --pool-workers overrides - default (15 workers + host, physical
+cores minus one) is best on this rig; 31 workers is -8% at 46K. The thread's +10% pool-workers win
+is a 2x3060 story (CPU-side expert work); here R4 keeps resident experts on the GPU at pcie-frac
+0.00 and the CPU pool has little to do. The thread's other two knobs are multi-GPU-only in the
+code: --pipeline-windows ("a layer split on exactly two GPUs", generate.cpp) and --trim-stage-
+weights (guarded by `if (!multi_gpu)`). Draft acceptances identical across all four variants.
+Open (needs root/GUI, handed to Jacob): the NVIDIA "CUDA Sysmem Fallback Policy" (driver 546+;
+darksteelsteed's tip) - Prefer No Sysmem Fallback makes VRAM overcommit fail honestly instead of
+silently paging decode into system RAM.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
