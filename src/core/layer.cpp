@@ -786,6 +786,9 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         else if (st.kv_turbo) {
             const uint64_t tb = strata::kernels::kv_turbo_bytes_per_head((int) s.head_dim,
                                                                          strata::kernels::g_kv_turbo_tier);
+            // the prompt gather's <=7 B word-window overread lives inside each array's granularity round-up,
+            // except when slots*rows*tb is an exact multiple of the granularity (elastic+turbo corner;
+            // the arena path carries explicit +16 B tails instead - see the take() branch below)
             per = {slot_rows * tb, slot_rows * tb};
         } else if (st.kv_q4) per = {slot_rows * q4_row, slot_rows * q4_row};
         else if (st.kv_int8) per = {slot_rows * s.head_dim, slot_rows * s.head_dim, slot_rows * scale_row, slot_rows * scale_row};
@@ -824,8 +827,10 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
     } else if (st.kv_turbo) {
         const uint64_t tb = strata::kernels::kv_turbo_bytes_per_head((int) s.head_dim,
                                                                      strata::kernels::g_kv_turbo_tier);
-        st.k_turbo = c.take<uint8_t>(rows * tb);
-        st.v_turbo = c.take<uint8_t>(rows * tb);
+        // +16 B tails: the prompt gather reads code bytes as aligned words and overreads at most 7 B past the
+        // last row (qsa_prompt_attn.cu's tq_group); the spare keeps every load inside the allocation.
+        st.k_turbo = c.take<uint8_t>(rows * tb + 16);
+        st.v_turbo = c.take<uint8_t>(rows * tb + 16);
     } else if (st.kv_q4) {
         st.k_q4 = c.take<uint8_t>(rows * q4_row);
         st.v_q4 = c.take<uint8_t>(rows * q4_row);

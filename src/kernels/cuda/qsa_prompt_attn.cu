@@ -160,8 +160,14 @@ void prompt_attn_turbo_tables() {
 // One 128-element group of a turbo row (the pool row of one cell's one KV head) dequantized to 128 consecutive
 // FP16 CODEBOOK values (norm NOT applied - the caller folds the returned block norm into ks/vs). The byte-indexed
 // tiers read the half2 LUTs; the TCQ tiers read the pre-rounded half codebooks (the TCQ codebooks are side-split
-// and the V side carries its decode alpha). Reads are per-byte on purpose: the tier blocks sit at 66/130-byte
-// strides, so the code bytes are never 16-byte aligned and vector loads would fault.
+// and the V side carries its decode alpha). The code-byte run is read as floor-aligned 32-bit words and one
+// uniform funnel shift per word re-aligns the window to qs: the row strides (66/130 B) keep every code run at
+// 0 or 2 mod 4, so the word window needs no runtime word offset - a 16-byte floor window would, and dynamic
+// register indexing would spill the window to local memory. SASS: turbo4's 64 LDG.E.U8 become 17 word loads;
+// every extraction is a constant-indexed register read. The window overreads at most 7 bytes past the block;
+// the VRAM pools carry 16 spare bytes after their last row (layer.cpp) and the parity harness mallocs +64, so
+// no load can leave its allocation. (Elastic VMM pools round each array up to the granularity, which covers
+// the tail unless the array size is an exact multiple of it - elastic+turbo corner, noted in the bench README.)
 template <int TIER>
 __device__ __forceinline__ __half tq_group(const QsaAttnPools& p, bool value, long long row, int g, __half* dst) {
     constexpr int groups = HD / 128;
@@ -169,28 +175,42 @@ __device__ __forceinline__ __half tq_group(const QsaAttnPools& p, bool value, lo
     const uint8_t* blk = (value ? p.v_turbo : p.k_turbo) + row * (groups * gb) + g * gb;
     const __half norm = __ushort_as_half(*reinterpret_cast<const uint16_t*>(blk));
     const uint8_t* qs = blk + 2;
+    // Code bytes any element read touches: vanilla = the payload; TCQ = payload plus the pad byte the last
+    // state window reaches (the same read the decode kernel's tq_value does).
+    constexpr int LEN = TIER == kTurbo8 ? 128 : TIER == kTurbo4 ? 64
+                      : TIER == kTurbo3Tcq ? 50 : TIER == kTurbo2Tcq ? 34 : 18;
+    constexpr int NS = (LEN + 3) / 4;   // aligned words holding the run
+    const uint32_t off = (uint32_t) (reinterpret_cast<uintptr_t>(qs) & 3u);
+    const uint32_t* wa = reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(qs) - off);
+    uint32_t w[NS + 1];
+#pragma unroll
+    for (int j = 0; j <= NS; ++j) w[j] = __ldg(wa + j);
+    uint32_t s[NS];
+    const uint32_t sh = off * 8u;   // 0 or 16 - one uniform SHF.R per word puts byte i of qs at s[i>>2]'s byte i&3
+#pragma unroll
+    for (int j = 0; j < NS; ++j) s[j] = __funnelshift_r(w[j], w[j + 1], sh);
+#define TQ_WIN(i) ((uint8_t) (s[(i) >> 2] >> (8 * ((i) & 3))))
     if constexpr (TIER == kTurbo8) {   // 8 bits/element: one code per byte, one half read each
 #pragma unroll
-        for (int j = 0; j < 128; ++j) dst[j] = d_pa_tq8_cb_h[qs[j]];
+        for (int j = 0; j < 128; ++j) dst[j] = d_pa_tq8_cb_h[TQ_WIN(j)];
     } else if constexpr (TIER == kTurbo4) {   // 4 bits/element: one half2 read per byte yields both nibbles
 #pragma unroll
-        for (int b = 0; b < 64; ++b) *reinterpret_cast<__half2*>(dst + 2 * b) = d_pa_tq4_lut[qs[b]];
+        for (int b = 0; b < 64; ++b) *reinterpret_cast<__half2*>(dst + 2 * b) = d_pa_tq4_lut[TQ_WIN(b)];
     } else {
         constexpr int k = TIER == kTurbo3Tcq ? 3 : (TIER == kTurbo2Tcq ? 2 : 1);
 #pragma unroll
         for (int j = 0; j < 128; ++j) {
             const int bp = j * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
             const int byte_idx = bp >> 3, bit_off = bp & 7;
-            // the last elements' window reaches up to two bytes past the code bytes; they are the block's zero
-            // padding (kv_turbo.cu's append), the same read the decode kernel's tq_value does
-            const uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8) |
-                                 ((uint32_t) qs[byte_idx + 2] << 16);
+            const uint32_t raw = (uint32_t) TQ_WIN(byte_idx) | ((uint32_t) TQ_WIN(byte_idx + 1) << 8) |
+                                 ((uint32_t) TQ_WIN(byte_idx + 2) << 16);
             const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
             dst[j] = TIER == kTurbo3Tcq ? (value ? d_pa_tq3_cb_v_h[state] : d_pa_tq3_cb_h[state])
                      : TIER == kTurbo2Tcq ? (value ? d_pa_tq2_cb_v_h[state] : d_pa_tq2_cb_h[state])
                                           : (value ? d_pa_tq1_cb_v_h[state] : d_pa_tq1_cb_h[state]);
         }
     }
+#undef TQ_WIN
     return norm;
 }
 
