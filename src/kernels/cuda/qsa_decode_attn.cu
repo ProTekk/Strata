@@ -78,27 +78,31 @@ __device__ __forceinline__ void load8_q4(const QsaAttnPools& p, bool value, long
     }
 }
 // ---- TurboQuant (KV_MODE 4): codebook[idx] * norm, O(1) per element - the sparse ids gather's best friend.
-// The tables are this TU's __constant__ materialization of the SAME constexpr arrays kv_turbo.cu uploads
+// The tables are this TU's materialization of the SAME constexpr arrays kv_turbo.cu uploads
 // (kv_turbo_tables.hpp is the single source; no runtime book-swaps exist, so the copies cannot desync).
-__constant__ float c_tq4_centroids[16] = {0};
-__constant__ float c_tq8_centroids[256] = {0};
-__constant__ float c_tq3_cb[512] = {0};
-__constant__ float c_tq3_cb_v[512] = {0};
-__constant__ float c_tq2_cb[256] = {0};
-__constant__ float c_tq2_cb_v[256] = {0};
-__constant__ float c_tq1_cb[256] = {0};
-__constant__ float c_tq1_cb_v[256] = {0};
+// They are __device__ globals, not __constant__: decode reads them with per-lane data-divergent code
+// indices, and a constant-memory read serializes one replay per unique address - the exact pathology
+// the prompt gather's tables escaped in 94a8649. Global reads take the divergent indices in L1
+// (16-512-entry tables stay hot); the values are identical, so every output is bitwise unchanged.
+__device__ float d_tq4_centroids[16] = {0};
+__device__ float d_tq8_centroids[256] = {0};
+__device__ float d_tq3_cb[512] = {0};
+__device__ float d_tq3_cb_v[512] = {0};
+__device__ float d_tq2_cb[256] = {0};
+__device__ float d_tq2_cb_v[256] = {0};
+__device__ float d_tq1_cb[256] = {0};
+__device__ float d_tq1_cb_v[256] = {0};
 void turbo_attn_tables() {
     static bool done = false;
     if (done) return;
-    cudaMemcpyToSymbol(c_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
-    cudaMemcpyToSymbol(c_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
-    cudaMemcpyToSymbol(c_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
-    cudaMemcpyToSymbol(c_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
-    cudaMemcpyToSymbol(c_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
-    cudaMemcpyToSymbol(c_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
-    cudaMemcpyToSymbol(c_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
-    cudaMemcpyToSymbol(c_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
+    cudaMemcpyToSymbol(d_tq4_centroids, kTurbo4Centroids, sizeof(kTurbo4Centroids));
+    cudaMemcpyToSymbol(d_tq8_centroids, kTurbo8Centroids, sizeof(kTurbo8Centroids));
+    cudaMemcpyToSymbol(d_tq3_cb, kTurbo3TcqCodebook, sizeof(kTurbo3TcqCodebook));
+    cudaMemcpyToSymbol(d_tq3_cb_v, kTurbo3TcqCodebookV, sizeof(kTurbo3TcqCodebookV));
+    cudaMemcpyToSymbol(d_tq2_cb, kTurbo2TcqCodebook, sizeof(kTurbo2TcqCodebook));
+    cudaMemcpyToSymbol(d_tq2_cb_v, kTurbo2TcqCodebookV, sizeof(kTurbo2TcqCodebookV));
+    cudaMemcpyToSymbol(d_tq1_cb, kTurbo1TcqCodebook, sizeof(kTurbo1TcqCodebook));
+    cudaMemcpyToSymbol(d_tq1_cb_v, kTurbo1TcqCodebookV, sizeof(kTurbo1TcqCodebookV));
     done = true;
 }
 
@@ -110,10 +114,10 @@ __device__ __forceinline__ float tq_value(const QsaAttnPools& p, bool value, lon
     const float norm = __half2float(__ushort_as_half(*reinterpret_cast<const uint16_t*>(blk)));
     const uint8_t* qs = blk + 2;
     const int t = j & 127;
-    if (tier == kTurbo8) return c_tq8_centroids[qs[t]] * norm;
+    if (tier == kTurbo8) return d_tq8_centroids[qs[t]] * norm;
     if (tier == kTurbo4) {
         const uint8_t idx = (t & 1) ? (qs[t / 2] >> 4) : (qs[t / 2] & 0xF);
-        return c_tq4_centroids[idx] * norm;
+        return d_tq4_centroids[idx] * norm;
     }
     const int k = tier == kTurbo3Tcq ? 3 : (tier == kTurbo2Tcq ? 2 : 1);
     const int bit_pos = t * k;   // the (L-k)-bit init prefix cancels against the state window (kv_turbo.cu)
@@ -121,9 +125,9 @@ __device__ __forceinline__ float tq_value(const QsaAttnPools& p, bool value, lon
     uint32_t raw = (uint32_t) qs[byte_idx] | ((uint32_t) qs[byte_idx + 1] << 8);
     if (k == 3) raw |= (uint32_t) qs[byte_idx + 2] << 16;
     const int state = (int) ((raw >> bit_off) & ((1u << (k == 3 ? 9 : 8)) - 1u));
-    const float cbv = tier == kTurbo3Tcq ? (value ? c_tq3_cb_v[state] : c_tq3_cb[state])
-                    : tier == kTurbo2Tcq ? (value ? c_tq2_cb_v[state] : c_tq2_cb[state])
-                                         : (value ? c_tq1_cb_v[state] : c_tq1_cb[state]);
+    const float cbv = tier == kTurbo3Tcq ? (value ? d_tq3_cb_v[state] : d_tq3_cb[state])
+                    : tier == kTurbo2Tcq ? (value ? d_tq2_cb_v[state] : d_tq2_cb[state])
+                                         : (value ? d_tq1_cb_v[state] : d_tq1_cb[state]);
     const float alpha = value ? (tier == kTurbo3Tcq ? kTurboTcqAlphaVT3
                                : tier == kTurbo2Tcq ? kTurboTcqAlphaVT2 : kTurboTcqAlphaVT1) : 1.0f;
     return cbv * norm * alpha;
@@ -140,7 +144,7 @@ __device__ __forceinline__ void load8_turbo(const QsaAttnPools& p, bool value, l
     const int t = d0 & 127;
     if constexpr (TIER == kTurbo8) {
 #pragma unroll
-        for (int j = 0; j < 8; ++j) out[j] = c_tq8_centroids[qs[t + j]] * norm;
+        for (int j = 0; j < 8; ++j) out[j] = d_tq8_centroids[qs[t + j]] * norm;
     } else if constexpr (TIER == kTurbo4) {
         const uint8_t two = qs[t / 2];
         const bool hi = (t & 1);
@@ -149,7 +153,7 @@ __device__ __forceinline__ void load8_turbo(const QsaAttnPools& p, bool value, l
             const uint8_t b = ((t + j) & 1) == (hi ? 1 : 0) && ((t + j) / 2) == (t / 2)
                                   ? two : qs[(t + j) / 2];
             const uint8_t idx = ((t + j) & 1) ? (b >> 4) : (b & 0xF);
-            out[j] = c_tq4_centroids[idx] * norm;
+            out[j] = d_tq4_centroids[idx] * norm;
         }
     } else {
 #pragma unroll
