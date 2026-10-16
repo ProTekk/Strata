@@ -77,7 +77,8 @@ constexpr float kInvSqrt128 = 0.08838834764831845f;
 
 // Sequential orthonormal FWHT-128 over 128 registers (buun's turbo_fwht_128_cuda verbatim). The butterfly
 // stage order fixes each output's operation tree; the warp-shuffle form below runs the SAME stage sequence,
-// so the two are bitwise equal.
+// so the two are bitwise equal. Kept as the serial reference (unused since the vanilla encode went
+// warp-cooperative): kv_turbo_parity's host oracle and both device forms mirror this order.
 __device__ __forceinline__ void turbo_fwht128_regs(float* x) {
     for (int h = 1; h < 128; h *= 2) {
         for (int i = 0; i < 128; i += h * 2) {
@@ -170,60 +171,161 @@ __global__ void turbo_rotate128_kernel(const float* __restrict__ src, float* __r
     if (threadIdx.x < 128) dst[offset + threadIdx.x] = buf[threadIdx.x] * kInvSqrt128 * s_second[threadIdx.x];
 }
 
-// ---- vanilla encode (turbo8_0 / turbo4_0): the whole 128-group in one thread's registers ----
-// buun runs this one-BLOCK-per-group with the group in shared memory; the math is per-thread sequential
-// (norm, rotate, quantize, norm-correct), so thread-per-group is bitwise identical. Thread 0 of the block
-// does the work (the block shape matches the TCQ kernel's grid; the other threads only exist for it).
+// ---- vanilla encode (turbo8_0 / turbo4_0): warp-cooperative, 8 groups per 256-thread block ----
+// The same math as buun's thread-serial pipeline, bit for bit, computed ONCE per group and stored to
+// every destination. It replaces a thread-0-of-a-32-thread-block body that (a) re-ran the whole
+// pipeline per destination (pool+host+stage = up to 3x) and (b) held x[128] in one thread's
+// registers: REG 255 + 608-640 B of stack spill, sharing the kernel with the TCQ body's 21.5 KB of
+// static smem - 2-4 blocks/SM. This kernel carries its own 5 KB and runs at the 6-block thread cap.
+// Bitwise contract (kv_turbo_parity replays the serial host oracle):
+//   - the serial chains (norm_sq over the raw values, recon_sq over the packed codes) stay exact
+//     left folds of __fadd_rn/__fmul_rn on lane 0 - a tree reduction would round differently;
+//   - the FWHT-128 butterfly runs the same ascending stage order (h = 1 .. 64) with the same
+//     pairings as the serial register form: h=1,2 in-lane, h>=4 one shfl_xor per stage with the
+//     side chosen by the lane bit - the TCQ body's shuffle FWHT already proves the construction;
+//   - the scale multiplies (inv_norm then s1; kInvSqrt128 then s2) stay two separate FMULs each,
+//     in the serial order - never folded into one;
+//   - everything else is per-element and order-free. turbo8's absmax is a true maximum: the warp
+//     tree is order-insensitive and matches the serial walk including the NaN/-0 edges (fmaxf picks
+//     the non-NaN operand; an all-NaN group ends at scale 1e-10f either way).
+// One warp = one (step, plane, head, group) item; the group's 128 floats arrive as one coalesced
+// float4 per lane (every source offset is a multiple of 128 floats from an aligned buffer).
+
+// turbo8's per-element code: the serial form's exact lrintf chain and clamp.
+__device__ __forceinline__ uint8_t tq8_code(float x, float inv_scale) {
+    const int idx0 = (int) lrintf(__fadd_rn(__fmul_rn(__fmul_rn(x, inv_scale), 127.5f), 127.5f));
+    return (uint8_t) (idx0 < 0 ? 0 : (idx0 > 255 ? 255 : idx0));
+}
 
 template <int TIER>
-__device__ __forceinline__ void turbo_quantize_vanilla_group(const float* __restrict__ src, uint8_t* __restrict__ dst) {
-    float x[128];
-    float norm_sq = 0.0f;
-    // __fmul_rn/__fadd_rn everywhere this file mirrors host arithmetic: nvcc's default FMA contraction fused
-    // `acc += s*s` and `x*inv*127.5f + 127.5f` into FFMA while the host kept separate ops - one ULP, and the
-    // lrint boundary flips (kv_turbo_parity caught it on one turbo8 block in 262k).
-#pragma unroll
-    for (int j = 0; j < 128; j++) norm_sq = __fadd_rn(norm_sq, __fmul_rn(src[j], src[j]));
-    const float norm = sqrtf(norm_sq);
-    const float inv_norm = norm > 1e-10f ? 1.0f / norm : 0.0f;
-#pragma unroll
-    for (int j = 0; j < 128; j++) x[j] = src[j] * inv_norm;
-    turbo_rotate_forward_regs(x);
+__global__ void __launch_bounds__(256) kv_append_turbo_vanilla_kernel(
+    const float* __restrict__ kcur, const float* __restrict__ vcur, const int32_t* __restrict__ step,
+    int step_stride, int planes, int n_items, int64_t pos0, const int32_t* __restrict__ table,
+    int kv_heads, int head_dim, int page_size, KvHostPools pools, KvHostPools host, KvHostPools stage) {
+    const int warp = threadIdx.x >> 5, lane = threadIdx.x & 31;
+    const int sp = blockIdx.z * 8 + warp;
+    if (sp >= n_items) return;                                       // warp-uniform
+    const int step_idx = (planes == 1) ? sp : (sp >> 1);
+    const bool is_v = (planes == 2) && (sp & 1);
+    const int h = blockIdx.x, g = blockIdx.y;
 
-    if (TIER == kTurbo4) {
-        auto* blk = reinterpret_cast<block_turbo4_0*>(dst);
+    __shared__ float sx[8][128];
+    __shared__ uint8_t scode[8][128];
+
+    const long long pos = (step != nullptr) ? (long long) __ldg(step + (long long) step_idx * step_stride + kStepPos)
+                                            : pos0 + step_idx;
+    const float* src = (is_v ? vcur : kcur) + (long long) step_idx * kv_heads * head_dim +
+                       (long long) h * head_dim + g * 128;
+
+    constexpr int GB = (int) kv_turbo_block_bytes(TIER);
+    const int row_bytes = (head_dim / 128) * GB;
+
+    const long long page = (long long) table[pos / page_size];
+    const long long host_row = ((pos / page_size) * kv_heads + h) * (long long) page_size + (pos % page_size);
+    const long long pool_row = (page * kv_heads + h) * (long long) page_size + (pos % page_size);
+    const bool write_pool = page >= 0;
+    const bool write_host = host.k_turbo != nullptr;
+    const bool write_stage = stage.k_turbo != nullptr;
+    if (!write_pool && !write_host && !write_stage) return;          // warp-uniform
+
+    const float4 v4 = *reinterpret_cast<const float4*>(src + 4 * lane);
+    sx[warp][4 * lane + 0] = v4.x; sx[warp][4 * lane + 1] = v4.y;
+    sx[warp][4 * lane + 2] = v4.z; sx[warp][4 * lane + 3] = v4.w;
+    __syncwarp();
+
+    // Chain 1: the group norm over the RAW values - buun's exact serial left fold, lane 0.
+    float norm = 0.0f;
+    if (lane == 0) {
+        float norm_sq = 0.0f;
 #pragma unroll
-        for (int j = 0; j < 128; j += 2) {
-            const uint8_t idx0 = turbo_find_nearest_4bit(x[j]);
-            const uint8_t idx1 = turbo_find_nearest_4bit(x[j + 1]);
-            blk->qs[j / 2] = (uint8_t) ((idx1 << 4) | idx0);
-        }
-        // Norm correction in the rotated space (sequential read-back of the packed codes, buun's order).
-        float recon_sq = 0.0f;
-#pragma unroll
-        for (int j = 0; j < 128; j++) {
-            const uint8_t idx = (j & 1) ? (blk->qs[j / 2] >> 4) : (blk->qs[j / 2] & 0xF);
-            const float r = c_turbo4_centroids[idx];
-            recon_sq = __fadd_rn(recon_sq, __fmul_rn(r, r));
-        }
-        const float recon_norm = sqrtf(recon_sq);
-        blk->norm = f16_from_f32((recon_norm > 1e-10f) ? norm / recon_norm : norm);
-    } else {
-        // turbo8_0: per-block absmax scale + uniform 256-grid (rotated-Q8; the Hadamard makes the tails tame).
-        auto* blk = reinterpret_cast<block_turbo8_0*>(dst);
-        float absmax = 0.0f;
-#pragma unroll
-        for (int j = 0; j < 128; j++) absmax = fmaxf(absmax, fabsf(x[j]));
-        const float scale = absmax > 1e-10f ? absmax : 1e-10f;
-        const float inv_scale = 1.0f / scale;
-#pragma unroll
-        for (int j = 0; j < 128; j++) {
-            const int idx0 = (int) lrintf(__fadd_rn(__fmul_rn(__fmul_rn(x[j], inv_scale), 127.5f), 127.5f));
-            const int idx = idx0 < 0 ? 0 : (idx0 > 255 ? 255 : idx0);
-            blk->qs[j] = (uint8_t) idx;
-        }
-        blk->norm = f16_from_f32(norm * scale);
+        for (int j = 0; j < 128; j++) norm_sq = __fadd_rn(norm_sq, __fmul_rn(sx[warp][j], sx[warp][j]));
+        norm = sqrtf(norm_sq);
     }
+    norm = __shfl_sync(0xffffffffu, norm, 0);
+    const float inv_norm = norm > 1e-10f ? 1.0f / norm : 0.0f;
+
+    // Normalize, then s1: two separate FMULs per element, serial order.
+    float c0 = __fmul_rn(__fmul_rn(v4.x, inv_norm), c_turbo_s1[4 * lane + 0]);
+    float c1 = __fmul_rn(__fmul_rn(v4.y, inv_norm), c_turbo_s1[4 * lane + 1]);
+    float c2 = __fmul_rn(__fmul_rn(v4.z, inv_norm), c_turbo_s1[4 * lane + 2]);
+    float c3 = __fmul_rn(__fmul_rn(v4.w, inv_norm), c_turbo_s1[4 * lane + 3]);
+
+    {   // FWHT-128 stages h = 1 and h = 2: pairs (0,1),(2,3) then (0,2),(1,3) - in-lane.
+        const float b0 = c0 + c1, b1 = c0 - c1, b2 = c2 + c3, b3 = c2 - c3;
+        c0 = b0 + b2; c2 = b0 - b2; c1 = b1 + b3; c3 = b1 - b3;
+    }
+#pragma unroll
+    for (int hb = 1; hb < 32; hb <<= 1) {          // stages h = 4*hb: 4, 8, 16, 32, 64
+        const float o0 = __shfl_xor_sync(0xffffffffu, c0, hb);
+        const float o1 = __shfl_xor_sync(0xffffffffu, c1, hb);
+        const float o2 = __shfl_xor_sync(0xffffffffu, c2, hb);
+        const float o3 = __shfl_xor_sync(0xffffffffu, c3, hb);
+        const bool hi = (lane & hb) != 0;          // element j = 4*lane+slot: j&h == 4*(lane&hb) for h >= 4
+        c0 = hi ? (o0 - c0) : (c0 + o0);
+        c1 = hi ? (o1 - c1) : (c1 + o1);
+        c2 = hi ? (o2 - c2) : (c2 + o2);
+        c3 = hi ? (o3 - c3) : (c3 + o3);
+    }
+    // The output scale, then s2: two separate FMULs again.
+    c0 = __fmul_rn(__fmul_rn(c0, kInvSqrt128), c_turbo_s2[4 * lane + 0]);
+    c1 = __fmul_rn(__fmul_rn(c1, kInvSqrt128), c_turbo_s2[4 * lane + 1]);
+    c2 = __fmul_rn(__fmul_rn(c2, kInvSqrt128), c_turbo_s2[4 * lane + 2]);
+    c3 = __fmul_rn(__fmul_rn(c3, kInvSqrt128), c_turbo_s2[4 * lane + 3]);
+
+    uint16_t nb = 0;                    // the block's norm field (lane 0 computes it)
+    uint16_t code0 = 0, code1 = 0;      // this lane's code bytes, packed for the aligned u16 stores
+    if constexpr (TIER == kTurbo4) {
+        const uint8_t i0 = turbo_find_nearest_4bit(c0);
+        const uint8_t i1 = turbo_find_nearest_4bit(c1);
+        const uint8_t i2 = turbo_find_nearest_4bit(c2);
+        const uint8_t i3 = turbo_find_nearest_4bit(c3);
+        // code byte b = (idx(2b+1) << 4) | idx(2b): bytes 2*lane and 2*lane+1, little-endian u16
+        code0 = (uint16_t) (((uint16_t) i1 << 4) | i0) |
+                (uint16_t) ((((uint16_t) i3 << 4) | i2) << 8);
+        *reinterpret_cast<uint16_t*>(&scode[warp][2 * lane]) = code0;
+        __syncwarp();
+        if (lane == 0) {
+            // Chain 2: the reconstruction norm over the packed codes in buun's serial read-back order.
+            float recon_sq = 0.0f;
+#pragma unroll
+            for (int j = 0; j < 128; j++) {
+                const uint8_t idx = (j & 1) ? (uint8_t) (scode[warp][j / 2] >> 4)
+                                            : (uint8_t) (scode[warp][j / 2] & 0xF);
+                const float r = c_turbo4_centroids[idx];
+                recon_sq = __fadd_rn(recon_sq, __fmul_rn(r, r));
+            }
+            const float recon_norm = sqrtf(recon_sq);
+            nb = f16_from_f32((recon_norm > 1e-10f) ? norm / recon_norm : norm);
+        }
+    } else {   // kTurbo8: per-block absmax scale + uniform 256-grid (no recon chain)
+        float m = fmaxf(fmaxf(fabsf(c0), fabsf(c1)), fmaxf(fabsf(c2), fabsf(c3)));
+#pragma unroll
+        for (int o = 16; o > 0; o >>= 1) m = fmaxf(m, __shfl_xor_sync(0xffffffffu, m, o));
+        const float scale = m > 1e-10f ? m : 1e-10f;
+        const float inv_scale = 1.0f / scale;
+        const uint8_t q0 = tq8_code(c0, inv_scale), q1 = tq8_code(c1, inv_scale);
+        const uint8_t q2 = tq8_code(c2, inv_scale), q3 = tq8_code(c3, inv_scale);
+        code0 = (uint16_t) ((uint16_t) q0 | ((uint16_t) q1 << 8));   // bytes 4*lane, 4*lane+1
+        code1 = (uint16_t) ((uint16_t) q2 | ((uint16_t) q3 << 8));   // bytes 4*lane+2, 4*lane+3
+        if (lane == 0) nb = f16_from_f32(__fmul_rn(norm, scale));
+    }
+
+    // One quantize, every destination. All offsets are even (66/130-B blocks, even rows), so the
+    // norm and the lane's code bytes store as aligned u16s.
+#define TQ_STORE(BASE) do {                                                          \
+        uint8_t* const b_ = (BASE);                                                  \
+        if (lane == 0) *reinterpret_cast<uint16_t*>(b_) = nb;                        \
+        if constexpr (TIER == kTurbo4) {                                             \
+            *reinterpret_cast<uint16_t*>(b_ + 2 + 2 * lane) = code0;                 \
+        } else {                                                                     \
+            *reinterpret_cast<uint16_t*>(b_ + 2 + 4 * lane) = code0;                 \
+            *reinterpret_cast<uint16_t*>(b_ + 4 + 4 * lane) = code1;                 \
+        }                                                                            \
+    } while (0)
+    if (write_pool)  TQ_STORE((is_v ? pools.v_turbo : pools.k_turbo) + pool_row * row_bytes + g * GB);
+    if (write_host)  TQ_STORE((is_v ? host.v_turbo  : host.k_turbo)  + host_row * row_bytes + g * GB);
+    if (write_stage) TQ_STORE((is_v ? stage.v_turbo : stage.k_turbo) + host_row * row_bytes + g * GB);
+#undef TQ_STORE
 }
 
 // ---- TCQ encode: one block per 128-group, 256 threads (buun's k_set_rows_turbo{2,3}_tcq shape) ----
@@ -312,12 +414,8 @@ __global__ void __launch_bounds__(256) kv_append_turbo_kernel(
     if (write_host)  { dsts[ndst] = is_v ? host.v_turbo : host.k_turbo;     rows[ndst] = host_row; ndst++; }
     if (write_stage) { dsts[ndst] = is_v ? stage.v_turbo : stage.k_turbo;   rows[ndst] = host_row; ndst++; }
 
-    if (!kIsTcq) {
-        if (sid != 0) return;
-        for (int d = 0; d < ndst; d++)
-            turbo_quantize_vanilla_group<TIER>(src, dsts[d] + rows[d] * row_bytes + g * gb);
-        return;
-    }
+    // The vanilla tiers run in kv_append_turbo_vanilla_kernel (warp-cooperative); this kernel is
+    // only instantiated for the TCQ tiers - launch_append dispatches.
 
     // ---- TCQ body ----
     __shared__ float x[128];
@@ -556,17 +654,23 @@ void launch_append(const float* kcur, const float* vcur, const int32_t* step, in
                    int64_t pos0, const int32_t* page_table, const QsaShapes& s, void* stream,
                    const KvHostPools* pools, const KvHostPools* host, const KvHostPools* stage) {
     const int planes = (vcur == nullptr || vcur == kcur) ? 1 : 2;
-    const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / 128), (unsigned) (n_steps * planes));
+    const int n_items = n_steps * planes;
     const KvHostPools p = pools ? *pools : KvHostPools{}, h = host ? *host : KvHostPools{},
                              st = stage ? *stage : KvHostPools{};
-    // TCQ needs the 256-thread Viterbi body; the vanilla tiers' thread-0 body does not - a 256-thread block
-    // there reserves 255 regs x 256 threads = the whole SM register file (ONE block/SM, one working warp),
-    // and 255/256 of the threads only exist to idle. 32-thread blocks fit 8 per SM: same math, same thread-0
-    // work, 8x the active warps (nsys: the encode was 67% of turbo4's PP penalty).
-    constexpr int kThreads = (TIER >= kTurbo3Tcq) ? 256 : 32;
-    kv_append_turbo_kernel<TIER><<<grid, kThreads, 0, (cudaStream_t) stream>>>(
-        kcur, vcur, step, step_stride, planes, pos0, page_table, (int) s.n_head_kv, (int) s.head_dim,
-        (int) s.page_size, p, h, st);
+    if constexpr (TIER >= kTurbo3Tcq) {
+        const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / 128), (unsigned) n_items);
+        kv_append_turbo_kernel<TIER><<<grid, 256, 0, (cudaStream_t) stream>>>(
+            kcur, vcur, step, step_stride, planes, pos0, page_table, (int) s.n_head_kv, (int) s.head_dim,
+            (int) s.page_size, p, h, st);
+    } else {
+        // Vanilla tiers: the warp-cooperative kernel, 8 groups per 256-thread block (its own 5 KB of
+        // smem - the shared kernel's 21.5 KB TCQ reservation capped the old shape at 2-4 blocks/SM).
+        const dim3 grid((unsigned) s.n_head_kv, (unsigned) (s.head_dim / 128),
+                        (unsigned) ((n_items + 7) / 8));
+        kv_append_turbo_vanilla_kernel<TIER><<<grid, 256, 0, (cudaStream_t) stream>>>(
+            kcur, vcur, step, step_stride, planes, n_items, pos0, page_table, (int) s.n_head_kv,
+            (int) s.head_dim, (int) s.page_size, p, h, st);
+    }
     check("kv_append_turbo launch");
 }
 
