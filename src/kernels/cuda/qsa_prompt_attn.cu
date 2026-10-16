@@ -90,12 +90,20 @@ __device__ __forceinline__ uint32_t pack_h2(float lo_k, float hi_k) {   // eleme
 // KV_MODE 5 (TurboQuant, `--kv turbo*`): the tier's blocks are dequantized to fp16 at gather (scale 1), so
 // everything downstream of the load is the mode-0 path; the caller rotates q and un-rotates the output
 // (kv_turbo.hpp). TIER is the second template parameter (g_kv_turbo_tier at launch).
-template <int KV_MODE>
+template <int KV_MODE, int TIER = 0>
 struct Smem {
-    using KElem = typename std::conditional<KV_MODE == 0 || KV_MODE == 5, __half, int8_t>::type;
-    using VElem = typename std::conditional<KV_MODE == 1 || KV_MODE == 4, int8_t, __half>::type;
-    static constexpr int KROW = (KV_MODE == 0 || KV_MODE == 5) ? HD + 8 : HD + 16;   // elements; 16-byte aligned rows, banks spread
-    static constexpr int VROW = (KV_MODE == 1 || KV_MODE == 4) ? HD + 16 : HD + 8;
+    // RAW4 (turbo4 only): stage the pool's raw code words - 32 u32 per (side, cell) instead of two
+    // 256-half FP16 rows. Staging bytes drop 4x (53 KB -> 29 KB total, 1 -> 3 blocks/SM: the smem
+    // wall ncu measured), and the half2-LUT decode moves into the score/p.v fragment loads, where
+    // each MMA b register is exactly one LUT entry. Row stride 34 words staggers the banks (32
+    // would put every cell's word w in bank w - an 8-way conflict on the score reads).
+    static constexpr bool RAW4 = (KV_MODE == 5 && TIER == kTurbo4);
+    using KElem = typename std::conditional<RAW4, uint32_t,
+                      typename std::conditional<KV_MODE == 0 || KV_MODE == 5, __half, int8_t>::type>::type;
+    using VElem = typename std::conditional<RAW4, uint32_t,
+                      typename std::conditional<KV_MODE == 1 || KV_MODE == 4, int8_t, __half>::type>::type;
+    static constexpr int KROW = RAW4 ? 34 : ((KV_MODE == 0 || KV_MODE == 5) ? HD + 8 : HD + 16);   // elements; 16-byte aligned rows, banks spread
+    static constexpr int VROW = RAW4 ? 34 : ((KV_MODE == 1 || KV_MODE == 4) ? HD + 16 : HD + 8);
     static constexpr int NG = KV_MODE == 4 ? HD / QK4_0 : 4;      // scale groups per row (q4_0: 8 of 32, else 4 of 64)
     __half qh[16][QS];
     __half ql[16][QS];
@@ -121,6 +129,12 @@ struct Smem {
 // constant-memory read serializes one replay per unique address - the gather's hot spot. Global reads take the
 // divergent indices in L1 instead.
 __device__ __half2 d_pa_tq4_lut[256];      // byte -> (low nibble, high nibble) as halves
+
+// The turbo4 LUT read as the raw u32 half2 pair: dims (2i, 2i+1) of a dequantized group, which is
+// exactly an MMA b fragment's register - the RAW4 score/p.v paths load b through this.
+__device__ __forceinline__ uint32_t tq4_lut32(unsigned byte) {
+    return *reinterpret_cast<const uint32_t*>(&d_pa_tq4_lut[byte]);
+}
 __device__ __half d_pa_tq8_cb_h[256];
 __device__ __half d_pa_tq3_cb_h[512];
 __device__ __half d_pa_tq3_cb_v_h[512];
@@ -216,7 +230,7 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                                                               int page_size, float scale_log2, float* __restrict__ attn,
                                                               int cap) {
     extern __shared__ __align__(16) unsigned char smem_raw[];
-    Smem<KV_MODE>& S = *reinterpret_cast<Smem<KV_MODE>*>(smem_raw);
+    Smem<KV_MODE, TIER>& S = *reinterpret_cast<Smem<KV_MODE, TIER>*>(smem_raw);
     const int qi = blockIdx.x, kvh = blockIdx.y;
     const int n_head = n_kv_heads * G;
     q += (size_t) qi * n_head * HD + (size_t) kvh * G * HD;
@@ -273,18 +287,42 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
             for (int i = t; i < 2 * CH * GROUPS; i += THREADS) {
                 const int kv = i / (CH * GROUPS), rem = i % (CH * GROUPS), c = rem / GROUPS, g = rem % GROUPS;
                 const long long r = S.row[c];
-                __half* dst = kv == 0 ? &S.k[c][g * 128] : &S.v[c][g * 128];
                 float sc = 0.0f;
-                if (r >= 0) {
-                    const __half norm = tq_group<TIER>(p, kv == 1, r, g, dst);
-                    const float alpha = kv == 1 ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
-                                              : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2
-                                              : TIER == kTurbo1Tcq ? kTurboTcqAlphaVT1 : 1.0f) : 1.0f;
-                    sc = __half2float(norm) * alpha;
-                } else {
-                    uint4 z = make_uint4(0, 0, 0, 0);
+                if constexpr (Smem<KV_MODE, TIER>::RAW4) {
+                    // turbo4 raw staging: the group's 16 aligned code words land in smem untouched
+                    // (64 B staged instead of 256 B of FP16; the dequant moves to the fragment
+                    // loads). A masked cell leaves its row stale: ks/vs = 0 make its score and its
+                    // folded probability +-0, so the finite LUT garbage never reaches acc - the
+                    // same outputs the zero-fill produced, with no fill at all.
+                    if (r >= 0) {
+                        constexpr int GB = (int) kv_turbo_block_bytes(kTurbo4);
+                        const uint8_t* blk = (kv == 1 ? p.v_turbo : p.k_turbo) + r * (GROUPS * GB) + g * GB;
+                        const uint8_t* qs = blk + 2;
+                        const uint32_t off = (uint32_t) (reinterpret_cast<uintptr_t>(qs) & 3u);
+                        const uint32_t* wa =
+                            reinterpret_cast<const uint32_t*>(reinterpret_cast<uintptr_t>(qs) - off);
+                        uint32_t w[17];   // the <=7 B tail overread lives in the pool's +16 B spare
 #pragma unroll
-                    for (int j = 0; j < 16; ++j) *reinterpret_cast<uint4*>(dst + j * 8) = z;
+                        for (int j = 0; j < 17; ++j) w[j] = __ldg(wa + j);
+                        const uint32_t sh = off * 8u;
+                        uint32_t* const dstw = (kv == 0 ? &S.k[c][g * 16] : &S.v[c][g * 16]);
+#pragma unroll
+                        for (int j = 0; j < 16; ++j) dstw[j] = __funnelshift_r(w[j], w[j + 1], sh);
+                        sc = __half2float(__ushort_as_half(*reinterpret_cast<const uint16_t*>(blk)));
+                    }
+                } else {
+                    __half* dst = kv == 0 ? &S.k[c][g * 128] : &S.v[c][g * 128];
+                    if (r >= 0) {
+                        const __half norm = tq_group<TIER>(p, kv == 1, r, g, dst);
+                        const float alpha = kv == 1 ? (TIER == kTurbo3Tcq ? kTurboTcqAlphaVT3
+                                                  : TIER == kTurbo2Tcq ? kTurboTcqAlphaVT2
+                                                  : TIER == kTurbo1Tcq ? kTurboTcqAlphaVT1 : 1.0f) : 1.0f;
+                        sc = __half2float(norm) * alpha;
+                    } else {
+                        uint4 z = make_uint4(0, 0, 0, 0);
+#pragma unroll
+                        for (int j = 0; j < 16; ++j) *reinterpret_cast<uint4*>(dst + j * 8) = z;
+                    }
                 }
                 // the block's 128 elements span two 64-dim scale groups: the norm goes to both slots
                 float* scd = kv == 0 ? &S.ks[c][2 * g] : &S.vs[c][2 * g];
@@ -412,7 +450,15 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                     al[1] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig]);
                     al[2] = *reinterpret_cast<const uint32_t*>(&S.ql[gid][k0 + 2 * tig + 8]);
                     al[3] = *reinterpret_cast<const uint32_t*>(&S.ql[gid + 8][k0 + 2 * tig + 8]);
-                    if constexpr (KV_MODE != 0 && KV_MODE != 5) {   // modes 1, 3, 4: the K side is INT8 codes
+                    if constexpr (Smem<KV_MODE, TIER>::RAW4) {
+                        // dims k0+2*tig..+1 and +8..+9: code byte (k0&127)/2 + tig of raw group
+                        // k0>>7 - all four tig lanes read the SAME aligned word (a broadcast), and
+                        // the LUT's half2 pair IS the b register.
+                        const int word = (k0 >> 7) * 16 + ((k0 & 127) >> 3);
+                        const uint32_t w0 = S.k[cb + gid][word], w1 = S.k[cb + gid][word + 1];
+                        b[0] = tq4_lut32((w0 >> (8 * tig)) & 0xFFu);
+                        b[1] = tq4_lut32((w1 >> (8 * tig)) & 0xFFu);
+                    } else if constexpr (KV_MODE != 0 && KV_MODE != 5) {   // modes 1, 3, 4: the K side is INT8 codes
                         b[0] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.k[cb + gid][k0 + 2 * tig]));
                         b[1] = i8x2_to_h2(*reinterpret_cast<const uint16_t*>(&S.k[cb + gid][k0 + 2 * tig + 8]));
                     } else {
@@ -513,7 +559,18 @@ __global__ void __launch_bounds__(THREADS) prompt_attn_kernel(const float* __res
                     const int j = gi * JPG + jj;
                     const int d = warp * 64 + j * 8 + gid;
                     uint32_t b[2];
-                    if constexpr (KV_MODE == 1 || KV_MODE == 4) {
+                    if constexpr (Smem<KV_MODE, TIER>::RAW4) {
+                        // dim d of two cells per b register: the warp's dims share one code word,
+                        // byte (d&127)>>1; each cell keeps the LUT half matching d's parity.
+                        const int widx = (d >> 7) * 16 + (((d & 127) >> 1) >> 2);
+                        const unsigned sh = 8u * (unsigned) (((d & 127) >> 1) & 3), halfsel = 16u * (unsigned) (d & 1);
+                        const uint32_t hA = (tq4_lut32((S.v[cA][widx] >> sh) & 0xFFu) >> halfsel) & 0xFFFFu;
+                        const uint32_t hB = (tq4_lut32((S.v[cA + 1][widx] >> sh) & 0xFFu) >> halfsel) & 0xFFFFu;
+                        const uint32_t hC = (tq4_lut32((S.v[cB][widx] >> sh) & 0xFFu) >> halfsel) & 0xFFFFu;
+                        const uint32_t hD = (tq4_lut32((S.v[cB + 1][widx] >> sh) & 0xFFu) >> halfsel) & 0xFFFFu;
+                        b[0] = hA | (hB << 16);
+                        b[1] = hC | (hD << 16);
+                    } else if constexpr (KV_MODE == 1 || KV_MODE == 4) {
                         const uint32_t x0 = (uint8_t) S.v[cA][d] | ((uint32_t) (uint8_t) S.v[cA + 1][d] << 8);
                         const uint32_t x1 = (uint8_t) S.v[cB][d] | ((uint32_t) (uint8_t) S.v[cB + 1][d] << 8);
                         b[0] = i8x2_to_h2(x0);
@@ -841,10 +898,10 @@ bool launch_i8(const float* q, const QsaAttnPools& pools, const int32_t* ids, co
 template <int KV_MODE, int TIER = 0>
 bool launch(const float* q, const QsaAttnPools& pools, const int32_t* ids, const int32_t* steps, int64_t cap,
             const QsaShapes& s, float* attn, int64_t n_q, cudaStream_t st) {
-    static bool attr[64] = {};   // per device, as above
+    static bool attr[64] = {};   // per device, as above (per template specialization: its own static)
     int dev = 0;
     cudaGetDevice(&dev);
-    const int bytes = (int) sizeof(Smem<KV_MODE>);
+    const int bytes = (int) sizeof(Smem<KV_MODE, TIER>);   // RAW4 turbo4: 29 KB, not 53
     if (dev < 0 || dev >= 64) return false;
     if (!attr[dev]) {
         if (cudaFuncSetAttribute(prompt_attn_kernel<KV_MODE, TIER>, cudaFuncAttributeMaxDynamicSharedMemorySize, bytes) !=
