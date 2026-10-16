@@ -139,13 +139,68 @@ Session arc of turbo4's PP penalty vs q4_0: -13..-14% (at merge) -> -8.4..-9.4% 
 32-thread blocks) -> **-4.1..-4.8%** (cooperative encode). Remaining PP penalty is ~86% the
 mode-5 prompt gather (+647 ms GPU at 32K) - raw-block staging territory.
 
+## Raw-block staging for the turbo4 gather (5b67fbda) - mode 5 now beats q4_0
+
+Backlog #4, the structural lever, landed for turbo4 (the priority tier; other tiers keep the FP16
+staging path). Smem<5, kTurbo4> stages the pool's aligned code WORDS - 32 u32 per (side, cell) at
+a 34-word bank-staggered stride - instead of dequantized FP16 rows: 64 B staged per item instead
+of 256 B, dynamic smem 53.0 -> 28.5 KB, 1 -> 3 blocks/SM (smem was ncu's sole limiter; occupancy
+8.33% -> 25%, REG 96 unchanged, zero spill). The half2-LUT dequant moved INTO the MMA fragment
+loads, where each b register is exactly one LUT entry: the score path reads two broadcast words
+per 16-dim step (all four tig lanes share a word; the LUT's half2 = dims k0+2tig,+1), the p.v
+path two cells per dim with d's parity selecting the half. Dequant counts are conserved - every
+dim decodes once per chunk, same as the staged form. The masked-cell zero-fill disappeared:
+ks/vs = 0 already makes the score and the folded probability +-0, and the LUT maps ANY byte to
+finite halves (no NaN path), so stale smem is harmless. The window tail overread rides the pools'
++16 B spare from 1bcb6a5c. The buun cp.async warning did not apply - this is LDG -> funnel shift
+-> STS through registers, not cp.async at 66-B strides.
+
+Receipts: parity 12/12 with turbo4's NEWHASHes bitwise identical; ms/chunk turbo4 12.70 -> 7.90
+at ctx 32768 (-38%) and 3.42 -> 2.08 at ctx 1500 - q4_0 is 9.02, so mode 5 is now FASTER than the
+control kernel; turbo8/TCQ/q4_0/int8/fp16 unchanged; kv_turbo_parity bitwise; ctest 20/20.
+
+nsys 32K prompt (production shapes, same harness as above):
+
+| kernel group | at merge | post-coop | post-raw-staging | q4_0 |
+|---|---:|---:|---:|---:|
+| prompt_attn | 2102.2 | 2156.6 | **1314.6** | 1509.2 |
+| kv_append | 1652.5 | 17.5 | 17.5 | 90.0 |
+| rotation | 142.3 | 144.0 | 148.8 | 47.0 |
+| total GPU | 13222 | 11644 | **10877** | 10894 |
+
+The turbo4 GPU-time penalty vs q4_0 is GONE at the kernel level (-17 ms): the attention saving
+(-195) plus the encode saving (-72) now outweigh the rotation cost (+102). What remains of any
+wall-clock PP gap is rotation (the bandwidth-bound FWHT-128 pairs on Q/out, backlog #7's fusion
+candidate) and turbo's cheaper streaming traffic (132 vs 144 B per row) pulling the other way.
+
+## Raw-staging A/B (ab_raw_staging.jsonl, 1 round, q4_0 + turbo4)
+
+| case | q4_0 | turbo4 | t4 vs q4 |
+|---|---:|---:|---:|
+| pp@32K | 2017.5 | 2027.4 | **+0.5%** |
+| pp@46080 | 1854.2 | 2125.1 | **+14.6%** (the control wobbled low this round; turbo4's 2125 is its best-ever absolute) |
+| pp@250K | 1961.5 | 1969.5 | **+0.4%** |
+| tg@4096 | 47.5 | 47.4 | -0.2% |
+| tg@46080 | 67.1 | 69.1 | +3.0% |
+| tg@250K | 58.9 | 56.7 | -3.7% (draft variance: 24/36 vs 26/41 acceptances) |
+
+TTFT: 32K 7.41 vs 7.44; 46K 20.8 vs 23.8 (-13%); 250K 104.7 vs 105.1 - the TTFT gap went
++15.3% (at merge) -> +4.2% (coop encode) -> parity. Needle 3/3 at 32K and 128K on both arms.
+
+**The PP penalty is gone: turbo4 runs at q4_0 speed (-0.2..+14.6%, parity within round noise on
+the two reliable cases) at 4.125 bpv vs 4.5 - the KV footprint and streaming-traffic savings are
+now free.** Session arc: -13..-14% -> -8.4..-9.4% (wide loads + 32-thread append) -> -4.1..-4.8%
+(coop encode) -> parity (raw-block staging). Every step bitwise against the parity gates.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
 2. ~~PP decomposition~~ DONE (nsys; encode 67% -> 51% after the launch fix).
 3. ~~Wide loads~~ DONE (committed, bitwise, -16% kernel).
-4. Raw-block staging (53 -> ~28 KB, 3 blocks/SM): NOW THE TOP PP LEVER - the mode-5 gather is
-   ~86% of the remaining penalty (+647 ms GPU at 32K). Buun cp.async warning stands.
+4. ~~Raw-block staging~~ DONE for turbo4 (5b67fbda): 53 -> 28.5 KB, 3 blocks/SM, gather decode
+   moved into the MMA fragment loads - mode 5 now beats q4_0's kernel (7.90 vs 9.02 ms/chunk) and
+   the GPU-total penalty is gone. Extending RAW staging to turbo8/TCQ tiers is open (same pattern,
+   bigger windows; TCQ needs the bit-unpack at fragment load).
 5. ~~Encode cooperative rewrite~~ DONE (e2b45452): warp-per-group with the serial chains on lane 0
    - 1652.5 -> 17.5 ms, bitwise, PP penalty -8.4..-9.4% -> -4.1..-4.8%. The buun-flat alternative
    was not needed.
