@@ -346,11 +346,11 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     // only, whatever ring shape it takes (0, a window, or the -1 fully-resident fallback).
     const bool kv_hybrid_was = qsa_kv_hybrid();
     const bool kv_int8_was = qsa_kv_int8();
-    const bool kv_turbo_was = qsa_kv_turbo();
     qsa_set_kv_hybrid(false);
     if (kv_hybrid_was) qsa_set_kv_int8(true);   // the drafter under --kv k8v4: plain INT8
-    if (kv_turbo_was) { qsa_set_kv_turbo(false, 0); qsa_set_kv_int8(true); }   // under turbo too (Phase 2:
-                                                 // the drafter's identity-ids read path has no turbo KV_MODE yet)
+    // Turbo applies to the drafter too: the identity-ids read IS qsa_decode_attn_batch, whose KV_MODE 4
+    // covers every tier, and the append/rotate seams are below. The old INT8 fallback is retired - its
+    // 1024 B/cell ring was ~2x turbo4's 528 and ate the main pool's whole footprint saving.
     uint64_t sb = qsa_state_bytes(g, max_cells, false, ring);
     if (cudaMalloc(&state_arena_, sb) != cudaSuccess) { err = "mtp: the K/V state does not fit"; return false; }
     if (qsa_state_init(g, max_cells, state_arena_, st_, &ss.qsa_states[ss.qsa_primary()], ring) == 0) {
@@ -366,7 +366,6 @@ bool MtpDrafter::load(const std::string& rt_dir, const ModelGeometry& g, Session
     }
     qsa_set_kv_int8(kv_int8_was);
     qsa_set_kv_hybrid(kv_hybrid_was);
-    if (kv_turbo_was) qsa_set_kv_turbo(true, strata::kernels::g_kv_turbo_tier);
     qsa_state_zero(st_, g, nullptr);
     cudaDeviceSynchronize();
     vram_ += sb;
@@ -964,14 +963,21 @@ bool MtpDrafter::record_front(int T, int row0, cudaStream_t cs, std::string& err
             fwht256_inplace_cuda(vcur_, (int64_t) T * NKV, cs);
         }
         // stored in the state's own format (#293 appended rotated INT8 K/V as Q4_0, into pools INT8 never has)
-        if (!no_batch_kv && st_.kv_q4)
+        if (!no_batch_kv && st_.kv_turbo)
+            kv_append_turbo_steps(st_.k_turbo, st_.v_turbo, st_.page_table, step, 4, T, kcur_, vcur_, s,
+                                  g_kv_turbo_tier, cs, &st_.host);
+        else if (!no_batch_kv && st_.kv_q4)
             kv_append_q4_steps(st_.k_q4, st_.v_q4, st_.page_table, step, 4, T, kcur_, vcur_, s, cs, &st_.host);
         else if (!no_batch_kv && st_.kv_int8)
             kv_append_q8_steps(st_.k_q, st_.v_q, st_.k_scale, st_.v_scale, st_.page_table, step, 4, kcur_, vcur_,
                                (int) (NKV * HD), T, s, cs, &st_.host);
         else
             for (int t = 0; t < T; ++t) {
-                if (st_.kv_q4)
+                if (st_.kv_turbo)
+                    kv_append_turbo_step(st_.k_turbo, st_.v_turbo, st_.page_table, step + t * 4,
+                                         kcur_ + t * NKV * HD, vcur_ + t * NKV * HD, s, g_kv_turbo_tier, cs,
+                                         &st_.host);
+                else if (st_.kv_q4)
                     kv_append_q4_step(st_.k_q4, st_.v_q4, st_.page_table, step + t * 4, kcur_ + t * NKV * HD,
                                       vcur_ + t * NKV * HD, s, cs, &st_.host);
                 else if (st_.kv_int8)
@@ -1028,11 +1034,13 @@ bool MtpDrafter::record_rest(int step_row, cudaStream_t cs, std::string& err) {
             norm_rope(qcur_, f32("self_attn.q_norm.weight"), (int) (T * NH), (int) HD, pos, cs);
         }
         if (st_.kv_rot) fwht256_inplace_cuda(qcur_, (int64_t) T * NH, cs);
+        if (st_.kv_turbo) turbo_rotate_forward128_cuda(qcur_, qcur_, (int64_t) T * NH * 2, cs);   // 2 groups/head
         g_mp.stamp(5, cs);
         const QsaAttnPools pools = qsa_attn_pools(st_);
         if (window_ > 0) window_ids(const_cast<int32_t*>(step), T, (int) window_, ident_, cap_, cs);
         qsa_decode_attn_batch(qcur_, pools, ident_, step, cap_, s, attn_scratch_, attn_, T, cs);
         if (st_.kv_rot) fwht256_inplace_cuda(attn_, (int64_t) T * NH, cs);
+        if (st_.kv_turbo) turbo_rotate_inverse128_cuda(attn_, attn_, (int64_t) T * NH * 2, cs);
         g_mp.stamp(6, cs);
         native_qsa_gate_apply(attn_, qfull_, attn32_, (int) (T * NH), (int) HD, cs);
         native_quantize_q8_1(attn32_, xq_, (int) (NH * HD), T, cs);
