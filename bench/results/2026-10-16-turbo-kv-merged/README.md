@@ -163,10 +163,15 @@ mode-5 prompt gather (+647 ms GPU at 32K) - raw-block staging territory.
    rotation into prompt_attn's q staging and the inverse into its epilogue removes the global
    round trips. Bitwise path exists (all three FWHT forms share the proven stage order), but the
    staging restructure is real surgery - candidate, not committed work.
-8. Gather LUT micro-variants (cheap experiments while #4 is undecided): the 64 divergent LUT
-   LDGs per item could become a 1 KB smem copy (LDS; +1 KB keeps 1 block/SM) or a 16-entry
-   register table read via shfl (zero memory ops, +ALU). At 8.3% occupancy the issue slots are
-   free and the memory latency is the wall - the shfl variant is the interesting one. Judge by
-   qsa_prompt_attn_parity ms/chunk (2.5-min runs), keep only a clear win.
+8. Gather LUT micro-variants: BOTH MEASURED NEGATIVE (10/16, reverted; bitwise in both cases -
+   NEWHASHes unchanged). (a) smem table copy (0.5-2 KB static, LDS instead of divergent L1 LDG):
+   turbo4 12.70 -> 12.55 (-1.7%, marginal), turbo8 15.27 -> 16.65 (+9% - the extra LDS contends
+   with the score loop's own smem traffic), TCQ +1..+4%. (b) turbo4-only 16-entry register table
+   via 2x __shfl_sync per code byte (uniform-call restructure, masked cells dequant row 0 with
+   scale 0): turbo4 12.70 -> 13.18 (+3.5%), ctx1500 3.42 -> 3.63 (+6%). The issue-slot trade
+   loses: post-wide-load, the L1-hot LUT reads are NOT the gather's wall. What remains of the
+   +3.7 ms/chunk gap to q4_0 is the FP16 staging volume itself (256 B/item STS + the 53 KB
+   footprint's 1-block/SM occupancy) = item 4's raw-block staging, as the 10/10 analysis said.
+   Do not retry LUT relocation without new evidence.
 - The 10/09 ab.jsonl and the 10/10 ab_post_kernel.jsonl stand as history; the q4_0 baseline moved
   with the engine (TG +10-15% upstream), so cross-session comparisons use each session's own q4_0.
