@@ -158,6 +158,10 @@ it is now an optimization-for-diminishing-returns, not a blocker.
 
 NEXT-STEP BACKLOG (10/10, after the post-kernel A/B)
 
+> 10/16 UPDATE: the branch merged onto v0.1.44.1 and items 1-3 are closed (44K outlier = noise;
+> nsys decomposition: encode 67% / gather 25%; wide word loads landed) - plus a 32-thread vanilla
+> append (-46% encode). See bench/results/2026-10-16-turbo-kv-merged/README.md.
+
 Verified paths (evidence-backed, in order):
 1. Confirm the 44K outlier (turbo4 -24.7% at tg@46080, one round; turbo2tcq -12.5% there,
    -11..-12% everywhere else). ~35 min GPU. If it reproduces, look at the kv_resident=32768
