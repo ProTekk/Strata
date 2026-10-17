@@ -1,0 +1,19 @@
+drained; gpu=15 MiB
+ready at 26s
+=== needle ===
+  32k depth  10%: FOUND  (32,778 prompt tokens, 14 s)
+  32k depth  50%: FOUND  (32,778 prompt tokens, 13 s)
+  32k depth  90%: FOUND  (32,779 prompt tokens, 13 s)
+ 128k depth  10%: FOUND  (125,046 prompt tokens, 52 s)
+ 128k depth  50%: FOUND  (125,044 prompt tokens, 53 s)
+ 128k depth  90%: FOUND  (125,044 prompt tokens, 46 s)
+6 of 6 found
+
+tg@250K: prompt_n=238686 pp=2298.2 tg=71.3 draft=11/12
+reply: The pattern is the exact repetition of the same sentence describing the lighthouse keeper's hourly weather log.
+prose sanity: Lighthouse keepers maintained meticulous weather records primarily to ensure navigational safety and to fulfill their official duties of reporting local conditions to maritime authorities. These daily logs provided critical data on wind, visibility, and sea states, allowing ships to anticipate hazar
+hit rates: ['77.2', '81.6', '84.9', '88.2', '77.6', '85.4']
+warnings: 0
+  route-resident: margin=0.25 ranks=6-9 windows T>8 (prompt reads): tail_nonres=0 swaps=0 (0.0%) nonres_entries before=0 after=0
+  route-resident: margin=0.25 ranks=6-9 windows T<=8 (decode): tail_nonres=23190 swaps=15127 (65.2%) nonres_entries before=45121 after=29994
+RR25 GATE DONE
