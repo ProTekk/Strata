@@ -293,6 +293,40 @@ buun's +28% needed their sparse persistent kernels AND ~36 tokens/expert; neithe
 The knob stays in the tree default-off (it is 15 lines and documented), the J-cap idea is CLOSED
 for this engine/model shape.
 
+## kv-grow ADOPTED into the turbo4 config (10/16 evening, kv_grow_probe.json)
+
+--kv-grow added to strata-huihui-iq3_s-turbo4.json (after the boundary fix 1a133a37 - without it
+this config would fault at exactly 131072/262144 cells). One boot, matched against the static
+B_896_auto variant of the config probe:
+
+| case | static 896 | kv-grow | delta |
+|---|---:|---:|---:|
+| tg@46080 (256 tok) | 81.3 | **85.6** | **+5.3%** |
+| tg@250000 (128 tok) | 82.7 | 82.1 | parity |
+| pp@250K (matched size) | 2276.6 | 2272.4 | flat |
+| expert slots at boot | 5474 | **6088** | +614 |
+| draft layer at boot | 966 MiB | 834 MiB | drafter pool elastic too |
+| #2065 warnings | 0 | 0 | - |
+
+The mechanism, from the log: boot maps 23828 cells (0.15 of the 1.73 GiB pool); the 46K request
+grows it to 55604 cells for 108 slots (36 hotter experts swapped into colder slots); the 250K
+request grows to 246256 cells for 649 slots (232 swaps). At house depths the freed KV VRAM stays
+in the expert cache - fewer misses, fewer fetches, fewer spins: that is the whole +5.3%. After a
+deep request tg returns to ~82 (the pool stays grown, the cache rebalances) - no pathology.
+The static-pool preference is reversed by measurement; --kv-grow stays in the config.
+
+## Fuse knobs on CUDA: tested neutral (fuse_probe.jsonl + confirm_fuse, 10/16 late evening)
+
+STRATA_FUSE_WAIT / STRATA_FUSE_HITS fold decode's spin launches into their consumer kernels
+(wait+plan-copy into one launch; moe_hit_add into the combine; wait folded into the row copy's
+blocks). Upstream defaults them ON for gfx12 only ("measured on gfx12"), OFF on NVIDIA. With
+kv-grow in the config: 4-variant probe showed fuse_wait +1.2%, fuse_hits +0.8%, both +0.6% at
+tg@46K - all within boot variance; the 6-boot alternating confirmation of the best (fuse_wait)
+landed at +0.10% (base 83.75 vs fuse 83.83, n=6 each). Replies byte-identical everywhere (the
+fusions do not move arithmetic). Verdict: NEUTRAL on this rig - under kv-grow the waits are
+already short and the launch saving is not the wall. Not adopted; knobs left at defaults. The
+6-boot base numbers (85.4-85.8 at 46K) also re-confirmed the kv-grow +5.3% across every boot.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
@@ -331,22 +365,25 @@ for this engine/model shape.
    +3.7 ms/chunk gap to q4_0 is the FP16 staging volume itself (256 B/item STS + the 53 KB
    footprint's 1-block/SM occupancy) = item 4's raw-block staging, as the 10/10 analysis said.
    Do not retry LUT relocation without new evidence.
-10. NEW - DONE (receipt below): the elastic-KV overread tail (layer.cpp): pool_chunks and the
+10. NEW - DONE + ADOPTED: the elastic-KV overread tail (layer.cpp): pool_chunks and the
     reserve layout now carry +16 B, closing the exact-chunk-boundary fault (--kv-grow + turbo4 at
     131072 cells, and fp16/int8 every 256 slots upstream). Receipt: STRATA_KV_GROW=1 boot, prompt
     calibrated to prompt_n=131066 (the (131056,131072] window where slots*per_slot = 33 chunks
-    exactly): no fault, coherent reply, pp 2490. Elastic boot numbers: "elastic K/V: 23828 of
-    262144 cells (0.15 of 1.73 GiB)", expert cache 6088 slots (+614 over static's 5474), and the
-    drafter's pool goes elastic too (draft layer 966 -> 834 MiB at boot). --kv-grow stays OFF in
-    the house configs (Jacob's call, 10/16): static 262K pool. If slot count ever matters more
-    than predictability, kv-grow is the +614-slot lever (it trades experts back on deep requests,
-    profile-guided regrow).
+    exactly): no fault, coherent reply, pp 2490. --kv-grow then WON its benchmark (+5.3% tg@46K,
+    +614 slots, parity at depth) and is now IN the turbo4 config - see the adoption section above.
+    The live q4_0 config keeps the static pool (untouched; kv-grow there would need its own run).
 11. NEW - MMQ J-cap: CLOSED, measured negative (see the decomposition section). STRATA_MMQ_JCAP
     knob in moe_mmq.cu, default off.
-12. NEW - the decode spin-wait structure: wait_flag_ge is 37.9% of decode GPU time (~99 waits per
-    verify round, 92.8us avg). Where the flags are set, whether the handshakes can be batched or
-    the wait folded into the consuming kernel, and how much of it is expert-arrival (cache-cold
-    capture; re-profile warm before concluding) - the biggest unexplored TG target.
+12. ~~Decode spin-wait structure~~ RE-DIAGNOSED (warm nsys, kv-grow config): the cold capture's
+    37.9% was expert-arrival waiting - warm, wait_flag_ge is 3.2% (avg 92.8 -> 7.6us: the flags
+    are already up). All-resident windows run the zero-doorbell graph (verify.cpp E-6, default
+    since 0.1.39); spins only remain for miss windows. Warm decode is launch-bound instead:
+    ~136 waits + ~200 small kernels (7-30us) per round - native_gu/down_multi 143/round,
+    q6_k_mmvq 51/round (28.4us), block_topk_wide 13/round (56us), turbo4 attn_chunk 13/round
+    (84.8us at 44K). Further TG work = fewer/fatter launches (the STRATA_LFUSE family is
+    multi-GPU-only - needs ar_on(), dead end here) or fewer misses: STRATA_ROUTE_RESIDENT
+    (residency-biased routing, margin in logits, default off) is the untested hit-rate lever -
+    it changes routing, so it needs a quality gate, not just speed.
 13. NEW - the GDN prefill trio ~15% of PP (gdn_rec_kh 5.9% at 4.4ms/instance, gr_write_norm_rs
     6.0%, gr_mix_r 3.3%): compare against buun's SM86 4-column GDN geometry (e27405a44 second
     half); Strata's kernels are its own, so this is a study, not a port.
