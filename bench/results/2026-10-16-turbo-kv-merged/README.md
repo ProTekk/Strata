@@ -262,6 +262,37 @@ Open (needs root/GUI, handed to Jacob): the NVIDIA "CUDA Sysmem Fallback Policy"
 darksteelsteed's tip) - Prefer No Sysmem Fallback makes VRAM overcommit fail honestly instead of
 silently paging decode into system RAM.
 
+## Beyond turbo: full-engine decompositions (10/16 evening, nsys on the final turbo4 binary)
+
+PP (32K prompt, eager kernels): cutlass f16 256x128 dense GEMMs 19.0%, turbo4 prompt_attn<5,1>
+12.1% (now only the #2 kernel), mul_mat_q IQ3_S J=128 11.8% (3477 launches) + IQ4_NL J=128 6.8%
+(3248) + J=112 tails 2.3%, gr_write_norm_rs 6.0%, gdn_rec_kh 5.9% (144 x 4.4ms), copy16_group 3.9%
+(15,754 launches), gr_mix_r 3.3%, quantize_mmq_q8_1 2.5%, moe_combine4 2.0%. The GDN trio sums to
+~15% (36/48 layers are GDN).
+
+TG (320-token generation, --cuda-graph-trace=node; plain nsys shows NOTHING for decode - it runs in
+CUDA graphs): **wait_flag_ge spin-waits 37.9%** (22,119 launches ~99/verify-round, avg 92.8us),
+fetch_blobs 10.4% + copy_rows_from_mapped 1.0% (33 expert misses/round - this capture was
+cache-cold, tg=54.9 vs 76.9% hit in house use), native_gu_multi IQ3_S 6.1%, small_mmvq Q8_0 4.1%
+(drafter), native_down_multi IQ4_NL 2.8%, mmvq_multi ~6.9%, q6_k_mmvq 2.0% (350 x 302us),
+attn_chunk<4,turbo4> 1.7%, gr_* ~5%. ~1558 launches per verify round. Reading: the decode pipeline
+spends more GPU time waiting for expert arrivals than computing - the slot-count levers (kv-grow's
++550 slots, profile quality) are TG levers too, and the spin structure (99 handshakes/round) is the
+biggest unexplored TG target.
+
+MMQ J-cap analysis (buun e27405a44 concept): Strata's wrapper already sizes tiles per sorted
+16-expert GROUP (ncols_opt = the group's max_rows, prefill.cpp:3360), not per ubatch - smarter than
+buun's pre-fix code. At the 8192-token chunk / 512 experts / ~160 rows per expert, the J=128 waste
+is the padded LAST tile (~37% of expert compute), and a narrow J would re-load weights per extra
+column tile - buun only won because their sparse persistent kernels avoid that. Opt-in knob added:
+STRATA_MMQ_JCAP=32|64 clamps ncols_opt in moe_mmq.cu (bitwise; J tiles the token dimension only).
+VERDICT (jcap_probe, pp@31336, one boot per variant): off 2590.2, JCAP=64 2529.3 (-2.4%),
+JCAP=32 2395.4 (-7.5%) - monotonically negative, exactly the weight-re-traffic failure mode: at
+~160 rows/expert the narrow tiles re-load the expert weights more than they save in padding.
+buun's +28% needed their sparse persistent kernels AND ~36 tokens/expert; neither holds here.
+The knob stays in the tree default-off (it is 15 lines and documented), the J-cap idea is CLOSED
+for this engine/model shape.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
@@ -300,5 +331,49 @@ silently paging decode into system RAM.
    +3.7 ms/chunk gap to q4_0 is the FP16 staging volume itself (256 B/item STS + the 53 KB
    footprint's 1-block/SM occupancy) = item 4's raw-block staging, as the 10/10 analysis said.
    Do not retry LUT relocation without new evidence.
+10. NEW - DONE (receipt below): the elastic-KV overread tail (layer.cpp): pool_chunks and the
+    reserve layout now carry +16 B, closing the exact-chunk-boundary fault (--kv-grow + turbo4 at
+    131072 cells, and fp16/int8 every 256 slots upstream). Receipt: STRATA_KV_GROW=1 boot, prompt
+    calibrated to prompt_n=131066 (the (131056,131072] window where slots*per_slot = 33 chunks
+    exactly): no fault, coherent reply, pp 2490. Elastic boot numbers: "elastic K/V: 23828 of
+    262144 cells (0.15 of 1.73 GiB)", expert cache 6088 slots (+614 over static's 5474), and the
+    drafter's pool goes elastic too (draft layer 966 -> 834 MiB at boot). --kv-grow stays OFF in
+    the house configs (Jacob's call, 10/16): static 262K pool. If slot count ever matters more
+    than predictability, kv-grow is the +614-slot lever (it trades experts back on deep requests,
+    profile-guided regrow).
+11. NEW - MMQ J-cap: CLOSED, measured negative (see the decomposition section). STRATA_MMQ_JCAP
+    knob in moe_mmq.cu, default off.
+12. NEW - the decode spin-wait structure: wait_flag_ge is 37.9% of decode GPU time (~99 waits per
+    verify round, 92.8us avg). Where the flags are set, whether the handshakes can be batched or
+    the wait folded into the consuming kernel, and how much of it is expert-arrival (cache-cold
+    capture; re-profile warm before concluding) - the biggest unexplored TG target.
+13. NEW - the GDN prefill trio ~15% of PP (gdn_rec_kh 5.9% at 4.4ms/instance, gr_write_norm_rs
+    6.0%, gr_mix_r 3.3%): compare against buun's SM86 4-column GDN geometry (e27405a44 second
+    half); Strata's kernels are its own, so this is a study, not a port.
+14. NEW - copy16_group_kernel: 15,754 launches / 3.9% of PP at ~2.3 launches per MMQ call -
+    expert-weight staging that may batch into fewer launches.
 - The 10/09 ab.jsonl and the 10/10 ab_post_kernel.jsonl stand as history; the q4_0 baseline moved
   with the engine (TG +10-15% upstream), so cross-session comparisons use each session's own q4_0.
+
+## TG under real content: prose vs code (10/16, HTTP, live serve config)
+
+Probe, not an A/B: same running serve (turbo4, vram-reserve 896, spec 4, min-p 0.70), temp 0,
+512-token completions, 4 rounds interleaved, per-round cache-busted prompts (cache_prompt false).
+Harness: ../../tg_content_bench.py; raw: tg_content.jsonl. Shallow ctx (~50-token prompts) -
+compare to tg@46K (81.3) in config_probe, NOT to each other across depths.
+
+  case             tg t/s   draft acc
+  prose_creative    97.8    0.69
+  prose_expository 102.3    0.69
+  prose_summarize  103.8    0.69
+  code_python      111.2    0.76
+  code_cpp         126.9    0.82
+  code_web         133.0    0.90
+  PROSE median     102.3    0.690
+  CODE median      126.9    0.817
+
+Read: code TG runs +24% over prose at shallow ctx, and the whole gap tracks draft acceptance
+(0.82 vs 0.69) - highly templated content (HTML/CSS, C++ boilerplate) feeds the MTP head
+predictable drafts; free prose does not. Spread is tight across rounds (+/-4%), seeds fixed.
+Implication for spec tuning: min-p 0.70 was validated on synthetic dumps; prose-heavy traffic
+sits at 0.69 acceptance, so any future min-p / spec-n retune should bench BOTH content classes.

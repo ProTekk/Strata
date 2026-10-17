@@ -1,0 +1,10 @@
+{"variant": "jcap_off", "run": 1, "prompt_n": 31336, "pp": 2590.2}
+{"variant": "jcap_off", "run": 2, "prompt_n": 7, "pp": 172.0}
+VARIANT jcap_off: pp runs [2590.2, 172.0]
+{"variant": "jcap_64", "run": 1, "prompt_n": 31336, "pp": 2529.3}
+{"variant": "jcap_64", "run": 2, "prompt_n": 7, "pp": 172.8}
+VARIANT jcap_64: pp runs [2529.3, 172.8]
+{"variant": "jcap_32", "run": 1, "prompt_n": 31336, "pp": 2395.4}
+{"variant": "jcap_32", "run": 2, "prompt_n": 7, "pp": 172.0}
+VARIANT jcap_32: pp runs [2395.4, 172.0]
+JCAP PROBE COMPLETE
