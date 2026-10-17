@@ -405,11 +405,25 @@ void Context::run(const Product& p, void* stream) {
     if (p.n <= 0 || p.max_rows <= 0) return;
     const ggml_type t = (ggml_type) p.type;
     const int64_t qk = ggml_blck_size(t), bpr = p.w_cols / qk;
+    // STRATA_MMQ_JCAP=32|64 (opt-in experiment, default off): cap the tile width the grouped expert
+    // launches are sized against. switch_J picks J from ncols_opt; every expert of a group gets
+    // ceil(max_rows/J) column tiles and pads its last one out to J, so at ~160 rows/expert (an 8K
+    // chunk, 512 experts) J=128 wastes ~37% of the expert compute in second tiles. A narrow J cuts
+    // the padding but re-loads the expert's weight rows once per extra column tile - buun-1016
+    // e27405a44 measured the tradeoff positive only with its sparse persistent kernels (which this
+    // pin does not have), so on the plain kernel it is an empirical question. Bitwise either way:
+    // J tiles the token dimension only, never a dot product. ncols_max (the launch grid) is untouched.
+    static const int64_t jcap = [] {
+        const char* e = std::getenv("STRATA_MMQ_JCAP");
+        const int v = e ? std::atoi(e) : 0;
+        return (int64_t) ((v == 32 || v == 64) ? v : 0);
+    }();
+    const int64_t nopt = (jcap && p.bounds) ? std::min<int64_t>(p.max_rows, jcap) : p.max_rows;
     const mmq_args a = {(const char*) p.w, t, (const int*) p.xq, p.ids, p.bounds, p.dst, p.y_scale,
                         p.w_cols, p.w_rows, p.total_rows, bpr, p.total_rows, p.ld_dst,
                         p.n, p.n, p.tab ? 0 : (int64_t) (p.expert_bytes / ggml_type_size(t)), 0, 0,
                         1, 1, 0, 0, 0,
-                        p.max_rows, p.max_rows};
+                        p.max_rows, nopt};
     auto& ctx = *(ggml_backend_cuda_context*) ctx_;
     const cudaStream_t s = (cudaStream_t) stream;
     if (p.tab) {
