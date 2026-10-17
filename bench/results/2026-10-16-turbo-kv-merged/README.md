@@ -327,6 +327,30 @@ fusions do not move arithmetic). Verdict: NEUTRAL on this rig - under kv-grow th
 already short and the launch saving is not the wall. Not adopted; knobs left at defaults. The
 6-boot base numbers (85.4-85.8 at 46K) also re-confirmed the kv-grow +5.3% across every boot.
 
+## STRATA_ROUTE_RESIDENT=0.25 ADOPTED into the turbo4 config (rr probe + gate, 10/16 late night)
+
+Residency-biased routing: rank 6-9 (tail) expert picks get a +0.25-logit nudge toward resident
+experts; prompt reads untouched (swaps only in T<=8 decode windows). Answers change - same class
+as upstream's own default ROUTE_TAIL_SKIP=7. Revert = delete the "env" key from the config.
+
+Speed (rr_probe, 2 alternating boots per variant, tg@46080 x2 per boot; run1 = fresh 44K, run2 =
+the continuation case = the household multi-turn pattern):
+
+| variant | run1 | run2 | mean |
+|---|---:|---:|---:|
+| base | 85.7 / 85.5 | 82.2 / 82.0 | 83.85 |
+| margin 0.10 | 77.5 / 77.4 | 87.3 / 87.2 | 82.35 (bimodal: mid-request churn at 28.5% swap) |
+| margin 0.25 | 86.5 / 87.0 | 88.3 / 88.7 | **87.62 (+4.5%; +7.7% on continuation)** |
+
+margin 0.25 swaps 64.6-65.2% of non-resident tail entries and never showed the 0.10 churn dip
+(reproduced both rounds, spread <1%). 0.5+ untested (quality risk grows; 0.25 is the validated
+point). Engine-side stat line: "route-resident: margin=0.25 ranks=6-9 ... swaps=15127 (65.2%)".
+
+Quality gate (rr25_gate, dedicated boot): needle 6/6 (32k x3, 128k x3), coherent + correct at
+238K depth (draft 11/12), four-sentence prose analysis clean, hit rates 77-88%, zero warnings.
+Adopted via the config's "env" key (server.py child_env merges it - verified in the engine's
+/proc environ); the live q4_0 config untouched.
+
 ## Backlog state after this session
 
 1. ~~44K outlier~~ CLOSED (noise).
@@ -381,12 +405,15 @@ already short and the launch saving is not the wall. Not adopted; knobs left at 
     ~136 waits + ~200 small kernels (7-30us) per round - native_gu/down_multi 143/round,
     q6_k_mmvq 51/round (28.4us), block_topk_wide 13/round (56us), turbo4 attn_chunk 13/round
     (84.8us at 44K). Further TG work = fewer/fatter launches (the STRATA_LFUSE family is
-    multi-GPU-only - needs ar_on(), dead end here) or fewer misses: STRATA_ROUTE_RESIDENT
-    (residency-biased routing, margin in logits, default off) is the untested hit-rate lever -
-    it changes routing, so it needs a quality gate, not just speed.
+    multi-GPU-only - needs ar_on(), dead end here) or fewer misses: ~~STRATA_ROUTE_RESIDENT~~
+    ADOPTED at margin 0.25 (see its section) - the remaining untested margin is 0.5+ (quality
+    risk grows; needs its own gate).
 13. NEW - the GDN prefill trio ~15% of PP (gdn_rec_kh 5.9% at 4.4ms/instance, gr_write_norm_rs
-    6.0%, gr_mix_r 3.3%): compare against buun's SM86 4-column GDN geometry (e27405a44 second
-    half); Strata's kernels are its own, so this is a study, not a port.
+    6.0%, gr_mix_r 3.3%): structural skim done (10/16) - Strata's kernel already has cp.async
+    double-buffered staging, register-resident state (VPK x RPG per thread), column ILP; buun's
+    4-column SM86 variant is the same class of design, not an obvious win. A rewrite flies blind
+    without ncu counters (ERR_NVGPUCTRPERM without sudo; NVreg_RmProfilingAdminOnly=0 would fix
+    that - root + reboot, Jacob's side). Ceiling ~3% PP. Low priority.
 14. NEW - copy16_group_kernel: 15,754 launches / 3.9% of PP at ~2.3 launches per MMQ call -
     expert-weight staging that may batch into fewer launches.
 - The 10/09 ab.jsonl and the 10/10 ab_post_kernel.jsonl stand as history; the q4_0 baseline moved

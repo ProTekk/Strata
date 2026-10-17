@@ -1,0 +1,10 @@
+round0 base: tg runs [85.4, 81.8]
+round0 fuse_wait: tg runs [85.6, 82.0]
+round1 base: tg runs [85.6, 81.9]
+round1 fuse_wait: tg runs [85.7, 82.1]
+round2 base: tg runs [85.8, 82.0]
+round2 fuse_wait: tg runs [85.6, 82.0]
+
+base n=6 mean=83.75 vals=[85.4, 81.8, 85.6, 81.9, 85.8, 82.0]
+fuse n=6 mean=83.83 vals=[85.6, 82.0, 85.7, 82.1, 85.6, 82.0]
+delta: +0.10%
