@@ -208,6 +208,8 @@ __device__ __forceinline__ int reduce12_head_of_lane(int lane) {
 // The chunk kernel's body; `p` is the query's KV pools (the call's one set, or blockIdx.z's slot's set).
 // (the body is a device function so the batch window's rows kernel below can run it over each query's own pools without
 // the default kernel's signature, or the function-pointer types the pre-sm_75 / HIP selections build, changing)
+// TIER (TurboQuant codec, KV_MODE 4) rides LAST: an int passed where a bool template parameter sits
+// converts silently, so the port's call sites must never shift upstream's positional booleans.
 template <int KV_MODE, bool LANE_CELL, bool QUERY_SWIZZLE, bool REDUCE12, int TIER = 0>
 __device__ __forceinline__ void attn_chunk_body(const float* __restrict__ q, QsaAttnPools p,
                                                 const int32_t* __restrict__ ids, const int32_t* __restrict__ step,
