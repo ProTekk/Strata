@@ -1,0 +1,8 @@
+{"variant": "base", "case": "tg@46080", "prompt_n": 44041, "tg": 84.7, "pp": 2531.3, "draft": "21/26", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "base", "case": "tg@250000", "prompt_n": 205922, "tg": 82.1, "pp": 2271.3, "draft": "21/28", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "fuse_wait", "case": "tg@46080", "prompt_n": 44041, "tg": 85.7, "pp": 2525.2, "draft": "21/26", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "fuse_wait", "case": "tg@250000", "prompt_n": 205922, "tg": 82.3, "pp": 2265.6, "draft": "21/28", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "fuse_hits", "case": "tg@46080", "prompt_n": 44041, "tg": 85.4, "pp": 2525.7, "draft": "21/26", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "fuse_hits", "case": "tg@250000", "prompt_n": 205922, "tg": 82.1, "pp": 2263.6, "draft": "21/28", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "both", "case": "tg@46080", "prompt_n": 44041, "tg": 85.2, "pp": 2529.8, "draft": "21/26", "reply": "The records consistently document identical weather conditions, "}
+{"variant": "both", "case": "tg@250000", "prompt_n": 205922, "tg": 82.2, "pp": 2266.8, "draft": "21/28", "reply": "The records consistently document identical weather conditions, "}

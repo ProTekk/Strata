@@ -1,0 +1,44 @@
+{
+ "results": [
+  {
+   "case": "tg@46080_first",
+   "prompt_n": 44041,
+   "pp": 2544.5,
+   "tg": 85.6,
+   "draft": "21/26"
+  },
+  {
+   "case": "tg@250000",
+   "prompt_n": 205922,
+   "pp": 2272.4,
+   "tg": 82.1,
+   "draft": "21/28"
+  },
+  {
+   "case": "tg@46080_after_deep",
+   "prompt_n": 27657,
+   "pp": 2424.2,
+   "tg": 81.8,
+   "draft": "16/27"
+  },
+  {
+   "case": "pp@32K",
+   "prompt_n": 14952,
+   "pp": 2482.3,
+   "tg": 81.3,
+   "draft": "0/0"
+  }
+ ],
+ "boot_lines": [
+  "strata mtp: draft layer loaded, 834 MiB of VRAM (experts 675, dense 111), files read in 0.32 s (2431 MiB/s)",
+  "expert cache auto: 16.19 GiB free, 896 MiB reserved (+218 MiB for the draft head) -> 6088 slots",
+  "elastic K/V: 23828 of 262144 cells in VRAM (0.15 of 1.73 GiB); the expert cache (7963 slots) gives the K/V room below slot 5776 as the context grows"
+ ],
+ "warnings": 0,
+ "grow_events": [
+  "[strata] 2026-10-16 21:50:55 engine started: /home/jacob/strata-tq-port/build/strata --serve --pack /home/jacob/Strata-data/packs/huihui-iq3_s --nativ",
+  "strata generate: elastic K/V: 23828 of 262144 cells in VRAM (0.15 of 1.73 GiB); the expert cache (7963 slots) gives the K/V room below slot 5776 as th",
+  "strata: K/V grown to 55604 cells (0.36 GiB); the expert cache gave 108 slots for it, 36 hotter experts moved to colder ones' slots (7855 of 7963 slots",
+  "strata: K/V grown to 246256 cells (1.57 GiB); the expert cache gave 649 slots for it, 232 hotter experts moved to colder ones' slots (7206 of 7963 slo"
+ ]
+}
