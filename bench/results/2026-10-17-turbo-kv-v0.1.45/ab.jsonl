@@ -1,0 +1,12 @@
+{"round": 1, "arm": "q4_0", "case": "tg@4096", "ttft_s": 5.241682152991416, "prompt_n": 3973, "predicted_n": 41, "tg": 45.1, "pp": 765.6, "draft_n": 38, "draft_n_accepted": 17}
+{"round": 1, "arm": "q4_0", "case": "tg@46080", "ttft_s": 21.000201040005777, "prompt_n": 44041, "predicted_n": 40, "tg": 64.7, "pp": 2100.6, "draft_n": 24, "draft_n_accepted": 19}
+{"round": 1, "arm": "q4_0", "case": "tg@250000", "ttft_s": 104.8145590260101, "prompt_n": 205922, "predicted_n": 52, "tg": 58.1, "pp": 1966.9, "draft_n": 41, "draft_n_accepted": 26}
+{"round": 1, "arm": "q4_0", "case": "pp@32K", "ttft_s": 7.4466565899929265, "prompt_n": 14952, "pp": 2015.3}
+{"round": 1, "arm": "q4_0", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,792 prompt tokens, 16 s)", "  32k depth  50%: FOUND  (32,792 prompt tokens, 15 s)", "  32k depth  90%: FOUND  (32,793 prompt tokens, 15 s)", "3 of 3 found"]}
+{"round": 1, "arm": "q4_0", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (127,284 prompt tokens, 60 s)", " 128k depth  50%: FOUND  (127,284 prompt tokens, 60 s)", " 128k depth  90%: FOUND  (127,285 prompt tokens, 31 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo4", "case": "tg@4096", "ttft_s": 4.058349343002192, "prompt_n": 3973, "predicted_n": 39, "tg": 55.6, "pp": 983.7, "draft_n": 28, "draft_n_accepted": 21}
+{"round": 1, "arm": "turbo4", "case": "tg@46080", "ttft_s": 23.023424504994182, "prompt_n": 44041, "predicted_n": 42, "tg": 59.0, "pp": 1916.1, "draft_n": 27, "draft_n_accepted": 20}
+{"round": 1, "arm": "turbo4", "case": "tg@250000", "ttft_s": 103.52927654898667, "prompt_n": 205922, "predicted_n": 52, "tg": 53.5, "pp": 1991.6, "draft_n": 38, "draft_n_accepted": 23}
+{"round": 1, "arm": "turbo4", "case": "pp@32K", "ttft_s": 7.376059771006112, "prompt_n": 14952, "pp": 2034.6}
+{"round": 1, "arm": "turbo4", "case": "needle@32k", "needle": ["32k depth  10%: FOUND  (32,792 prompt tokens, 16 s)", "  32k depth  50%: FOUND  (32,792 prompt tokens, 15 s)", "  32k depth  90%: FOUND  (32,793 prompt tokens, 15 s)", "3 of 3 found"]}
+{"round": 1, "arm": "turbo4", "case": "needle@128k", "needle": ["128k depth  10%: FOUND  (127,284 prompt tokens, 60 s)", " 128k depth  50%: FOUND  (127,284 prompt tokens, 59 s)", " 128k depth  90%: FOUND  (127,285 prompt tokens, 30 s)", "3 of 3 found"]}
