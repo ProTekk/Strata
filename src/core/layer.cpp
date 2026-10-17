@@ -542,7 +542,13 @@ std::vector<std::unique_ptr<ElasticPool>> g_pools;
 
 int64_t pool_chunks(const ElasticPool& p, size_t a, int64_t slots) {
     const uint64_t G = strata::core::vmm_granularity();
-    return (int64_t) (((uint64_t) slots * p.per_slot[a] + G - 1) / G);
+    // +16 B: the prompt gather reads code bytes as aligned words and overreads at most 7 B past the
+    // last cell. Inside the granularity round-up that is free - except when slots*per_slot is an exact
+    // multiple of G (turbo4 lands on one at 131072 and 262144 cells; fp16/int8 every 256 slots), where
+    // the overread would walk off the last mapped chunk into unmapped VA. The slack chunk costs 2 MiB
+    // of physical only in that exact-boundary case; grow and shrink both use this count, so it is
+    // symmetric (the arena path carries explicit +16 B tails instead - see the take() branch).
+    return (int64_t) (((uint64_t) slots * p.per_slot[a] + 16 + G - 1) / G);
 }
 int64_t pool_slots(const ElasticPool& p, int64_t cells) {
     return std::min<int64_t>(p.n_slots, std::max<int64_t>((cells + p.page_size - 1) / p.page_size, 1));
@@ -735,9 +741,6 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         else if (st.kv_turbo) {
             const uint64_t tb = strata::kernels::kv_turbo_bytes_per_head((int) s.head_dim,
                                                                          strata::kernels::g_kv_turbo_tier);
-            // the prompt gather's <=7 B word-window overread lives inside each array's granularity round-up,
-            // except when slots*rows*tb is an exact multiple of the granularity (elastic+turbo corner;
-            // the arena path carries explicit +16 B tails instead - see the take() branch below)
             per = {slot_rows * tb, slot_rows * tb};
         } else if (st.kv_q4) per = {slot_rows * q4_row, slot_rows * q4_row};
         else if (st.kv_int8) per = {slot_rows * s.head_dim, slot_rows * s.head_dim, slot_rows * scale_row, slot_rows * scale_row};
@@ -747,7 +750,8 @@ uint64_t qsa_state_init(const ModelGeometry& g, int64_t max_cells, void* base, Q
         uint64_t at = 0;
         for (const uint64_t b : per) {
             pool->off.push_back(at);
-            at += ((uint64_t) p.slots * b + G - 1) / G * G;
+            // the +16 matches pool_chunks' overread slack, so the reserve always covers what grow may map
+            at += ((uint64_t) p.slots * b + 16 + G - 1) / G * G;
         }
         pool->per_slot = per;
         pool->n_slots = p.slots;
