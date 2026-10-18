@@ -101,6 +101,39 @@ That was the ONLY loss found by the audits below.
   NOTE: v0.1.45 serve counts thinking tokens against max_tokens (answer_room:false opts out) -
   watch reply lengths on clients that send small caps.
 
+## Regression hunt (10/17 evening, "TG-at-depth acceptance shift") - CLOSED: not the merge
+
+Question: turbo4 acceptance at 46K fell 22/24 (10/16) -> 20/27 (10/17 A/B). Hunt:
+
+- Rebuilt the PRE-rebase tip (backup/turbo-kv-prebase-20261017) in a git worktree at
+  ~/strata-prebase (configure needs -DSTRATA_ENABLE_CUDA=ON -DSTRATA_MMQ_KQUANTS=OFF
+  -DSTRATA_Q6K_EXPERTS=OFF to match the house cache; plain `strata` target, ccache made it minutes).
+- tools/kv_regress_probe.py: the exact ab tg@46080 case against any build, --env for engine env,
+  captures text + draft counters. Results in regress/ (probe-*.json, probe-server-*.log).
+- Findings:
+  1. Old and new builds produce BYTE-IDENTICAL completion text (5 runs each side, deterministic
+     within a build: old 19/24 x3, new 20/27 x2; tg 53.7-55.8 vs 53.8-55.5 = parity).
+  2. The OLD build does not reproduce its own 10/16 acceptance (22/24 -> 19/24): the shift is
+     day-level environment, present without the rebase.
+  3. STRATA_STATE_HASH=1 both builds: warmup request (L=22) - ALL hashes bitwise identical
+     (kv=, mtp=, gdn=, ple=, pooled=): the merged engine's state == the pre-rebase engine's state.
+     46K case (L=44082) - every content hash differs across builds while text/L stay identical.
+  4. Mechanism (engine's own docs/logs): experts compute on GPU-cache vs CPU/file tier with
+     DIFFERENT ROUNDING ("it rounds differently from the CPU"), and STRATA_ROUTE_TAIL_SKIP=7 is
+     ON by default (skips rank>=7 missed experts; upstream's own #1884 note: skips cost draft
+     acceptance). v0.1.45's cache group changed cache/file-tier policy, and day-level page-cache/
+     RAM-copy state shifts which experts miss. Verified-token argmax is robust to the rounding
+     wobble; draft acceptance at --spec-min-p 0.70 is a near-threshold decision and is not.
+  5. Proof the channel is environmental: old build + STRATA_ROUTE_TAIL_SKIP=0 -> trajectory
+     (39 -> 42 tokens, text changes) and acceptance (19/24 -> 17/27) move on the SAME binary.
+  6. q4_0's acceptance was stable across days because its draft decisions sit far from the 0.70
+     threshold, not because it is immune.
+- Verdict: the rebase changed no math (warmup state bitwise, NEWHASH bitwise, identical texts).
+  The A/B "TG -9% vs control" is acceptance sensitivity to residency state - compare TG only
+  same-day old-vs-new, or pin the cache regime (tail-skip/env) when acceptance matters.
+- New-vs-old real deltas: upstream mtp restructure changes draft ROUND structure (24 -> 27 rounds,
+  +1 net accepted) at equal speed; that is upstream behavior, not port damage.
+
 ## Notes for the next session
 
 - serve/server.py behavior change upstream: max_tokens now COUNTS thinking tokens (answer_room

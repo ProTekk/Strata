@@ -1,0 +1,13 @@
+{
+ "engine": "/home/jacob/strata-tq-port/build/strata",
+ "kv": "turbo4",
+ "spec": true,
+ "depth": 46080,
+ "prompt_n": 44041,
+ "predicted_n": 39,
+ "draft_n": 27,
+ "draft_n_accepted": 20,
+ "tg": 55.3,
+ "pp": 2016.8,
+ "text": "The records consist of a single, repetitive sentence describing consistent weather conditions with northwest winds, moderate seas, and good visibility. This identical phrase is repeated continuously throughout the entire text without any variation."
+}
