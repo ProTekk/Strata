@@ -94,6 +94,9 @@ ALLOWED = {
     "strata::kernels::{anonymous}::gdn_step_norm_multi_kernel": {"sm_86": (8, 0)},
     # on f-027-int (CUDA 13.0): a stack frame, measured; no spill or local array located in the source yet
     "strata::kernels::{anonymous}::gemm8_kernel": {"sm_120": (136, 0), "sm_86": (104, 0)},
+    # float acc[R][8] / xs[8]: the warp's row tile; spills at the 64-register cap of __launch_bounds__(WARPS * 32)
+    # on sm_86 (measured, the R = 2 / R = 4 instantiations; the R = 8 one spills 8)
+    "strata::kernels::{anonymous}::gemm_rows_kernel": {"sm_86": (40, 0)},
     # float gw[HC] / ss[HC] (no spill)
     "strata::kernels::{anonymous}::gr_down_kernel": {"sm_120": (16, 0)},
     # spill 8 / 24 at 80 registers under __launch_bounds__(THREADS = 256); its acc[MAX_T] / s[MAX_T] / wv[TQ] stay in
@@ -116,6 +119,9 @@ ALLOWED = {
     "strata::kernels::{anonymous}::gr_up_q8_fast_kernel": {"sm_86": (8, 0)},
     # spill 4 / 4 at 40 registers under __launch_bounds__(THREADS = 256), no local array
     "strata::kernels::{anonymous}::gr_up_v3_kernel": {"sm_120": (8, 0)},
+    # uint8_t* dsts[3] / long long rows[3]: the K/V/scale destinations, copied to the stack to index them with
+    # the plane loop variable (no spill)
+    "strata::kernels::{anonymous}::kv_append_turbo_kernel": {"sm_86": (48, 0)},
     # spill 4 / 4 at 48 registers under __launch_bounds__(256), no local array
     "strata::kernels::{anonymous}::native_down_kernel": {"sm_86": (8, 0)},
     # int off[GRP_NC] / float s[GRP_NC] (GRP_NC = 4): per-entry token offsets and partial sums, plus spill 16 / 16
@@ -143,6 +149,8 @@ ALLOWED = {
     "strata::kernels::{anonymous}::prompt_attn_kernel": {"sm_86": (8, 0)},
     # on f-027-int (CUDA 13.0): a stack frame, measured; no spill or local array located in the source yet
     "strata::kernels::{anonymous}::rope_table_kernel": {"sm_120": (32, 0), "sm_86": (32, 0)},
+    # the address-taken float s / c handed to sincosf: a stack frame, measured on the house 3090 (CUDA 13.3); no spill
+    "strata::kernels::{anonymous}::rope_table_inv_kernel": {"sm_86": (32, 0)},
     # float values[16]: the lane's 16 logits for the top-k selection (no spill)
     "strata::kernels::{anonymous}::route": {"sm_86": (64, 0)},
     # float values[16]: the lane's 16 logits for the top-k selection (no spill)
