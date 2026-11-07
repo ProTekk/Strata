@@ -169,6 +169,11 @@ ALLOWED = {
     # spill 36 / 52 (sm_86), 32 / 32 (sm_120) at the 128-register cap of __launch_bounds__(THREADS = 512, 1); its q[8]
     # / raw[5] / bq[4] / a[4] / d[4] stay in registers
     "strata::prefill::fused::{anonymous}::native_kernel": {"sm_120": (32, 0), "sm_86": (32, 0)},
+    # NEW in 0.2.12 (opt-in STRATA_IQ4_W4A8 int8 MMQ line, sm_80..sm_88): the pipelined IQ4 kernel's per-thread
+    # arrays a[4][4] / da[4][2] / nm[4][2] / bq[2][4][2] / dq[2][2] are indexed through the b / buf pipeline loops,
+    # so they go to local memory on sm_86.  One entry for every instantiation (Cfg TILE_K 96 / 104 / 112 / 128,
+    # both bool arms): STACK 8..40, LOCAL 0, measured on the house 3090 with CUDA 13.3 (cuobjdump)
+    "strata::prefill::mmq::{anonymous}::iq4_w4a8_kernel": {"sm_86": (40, 0)},
     # float x[GRW_PER] (GRW_PER = 10): the thread's rows for the norm (no spill)
     "strata::prefill::{anonymous}::gr_write_cvec_norm_rs_kernel": {"sm_86": (40, 0)},
     # float v[GRW_PER] (GRW_PER = 10): the thread's rows for the norm (no spill)
